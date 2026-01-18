@@ -1,0 +1,58 @@
+#!/bin/bash
+#
+# ClipABit Plugin Installer - Postinstall Script
+# This script runs automatically when the .pkg is installed
+#
+
+set -e
+
+# Get the current user (even when run with sudo)
+CURRENT_USER="${USER:-$(whoami)}"
+if [ "$CURRENT_USER" = "root" ]; then
+    CURRENT_USER=$(stat -f "%Su" /dev/console)
+fi
+
+USER_HOME=$(eval echo "~$CURRENT_USER")
+
+echo "Running ClipABit Plugin Installer..."
+echo "Installing for user: $CURRENT_USER"
+echo "User home: $USER_HOME"
+
+# Target directory in user space
+TARGET_DIR="$USER_HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/ClipABit"
+
+# Get the staging directory where package files were copied
+STAGING_DIR="$2/ClipABit"
+
+echo "Staging directory: $STAGING_DIR"
+echo "Target directory: $TARGET_DIR"
+
+# Create target directory structure
+echo "Creating plugin directory..."
+mkdir -p "$TARGET_DIR"
+
+# Copy plugin files from staging to user directory
+if [ -d "${STAGING_DIR}/frontend/plugin" ]; then
+    echo "Copying plugin files..."
+    cp -R "${STAGING_DIR}/frontend/plugin/"* "$TARGET_DIR/"
+    
+    # Set proper ownership
+    chown -R "$CURRENT_USER:staff" "$TARGET_DIR"
+    chmod -R 755 "$TARGET_DIR"
+    
+    echo "✓ Plugin files copied successfully"
+else
+    echo "✗ Error: Plugin files not found at ${STAGING_DIR}/frontend/plugin"
+    exit 1
+fi
+
+# Run the Python installer script for dependency installation
+if [ -f "${STAGING_DIR}/installer-script.py" ]; then
+    echo "Installing Python dependencies..."
+    sudo -u "$CURRENT_USER" /usr/bin/python3 "${STAGING_DIR}/installer-script.py" || true
+fi
+
+echo "✓ ClipABit plugin installed successfully to user directory"
+echo "  Location: $TARGET_DIR"
+
+exit 0
