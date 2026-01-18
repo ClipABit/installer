@@ -11,6 +11,14 @@ import shutil
 import platform
 from pathlib import Path
 
+# For reading pyproject.toml
+try:
+    import tomllib  # Python 3.11+
+except ImportError:
+    try:
+        import tomli as tomllib  # Fallback for Python 3.8-3.10
+    except ImportError:
+        tomllib = None
 class Colors:
     """Terminal colors for pretty output."""
     HEADER = '\033[95m'
@@ -166,15 +174,56 @@ def check_pip_installation():
             return False
 
 
+def get_dependencies_from_pyproject():
+    """Read dependencies from pyproject.toml."""
+    script_dir = Path(__file__).parent.absolute()
+    pyproject_path = script_dir / "frontend/plugin/pyproject.toml"
+    
+    if not pyproject_path.exists():
+        print_warning(f"pyproject.toml not found at {pyproject_path}")
+        # Fallback to hardcoded dependencies
+        return [
+            "pyqt6>=6.10.0",
+            "requests>=2.31.0",
+            "watchdog>=3.0.0",
+        ]
+    
+    # Try to parse pyproject.toml
+    if tomllib is None:
+        print_warning("TOML parser not available, using fallback dependencies")
+        return [
+            "pyqt6>=6.10.0",
+            "requests>=2.31.0",
+            "watchdog>=3.0.0",
+        ]
+    
+    try:
+        with open(pyproject_path, "rb") as f:
+            data = tomllib.load(f)
+            dependencies = data.get("project", {}).get("dependencies", [])
+            if dependencies:
+                print_success(f"Loaded {len(dependencies)} dependencies from pyproject.toml")
+                return dependencies
+            else:
+                print_warning("No dependencies found in pyproject.toml")
+                return []
+    except Exception as e:
+        print_error(f"Failed to read pyproject.toml: {e}")
+        return [
+            "pyqt6>=6.10.0",
+            "requests>=2.31.0",
+            "watchdog>=3.0.0",
+        ]
+
 def install_dependencies():
     """Install required Python packages."""
     print_info("Installing Python dependencies...")
     
-    dependencies = [
-        "pyqt6>=6.10.0",
-        "requests>=2.31.0",
-        "watchdog>=3.0.0",
-    ]
+    dependencies = get_dependencies_from_pyproject()
+    
+    if not dependencies:
+        print_warning("No dependencies to install.")
+        return True
     
     for dep in dependencies:
         print_info(f"Installing {dep}...")
