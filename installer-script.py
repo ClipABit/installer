@@ -11,7 +11,6 @@ import shutil
 import platform
 from pathlib import Path
 
-
 class Colors:
     """Terminal colors for pretty output."""
     HEADER = '\033[95m'
@@ -51,30 +50,46 @@ def print_info(message):
     print(f"{Colors.OKCYAN}ℹ {message}{Colors.ENDC}")
 
 
-def check_macos():
-    """Check if running on macOS."""
-    if platform.system() != "Darwin":
-        print_error("This installer is designed for macOS only.")
+def check_platform():
+    """Check if running on a supported platform."""
+    system = platform.system()
+    if system == "Darwin":
+        print_success(f"Running on macOS {platform.mac_ver()[0]}")
+        return True
+    elif system == "Windows":
+        print_success(f"Running on Windows {platform.version()}")
+        return True
+    else:
+        print_error(f"Unsupported platform: {system}")
+        print_info("This installer supports macOS and Windows only.")
         return False
-    print_success(f"Running on macOS {platform.mac_ver()[0]}")
-    return True
 
 
 def check_davinci_resolve():
     """Check if DaVinci Resolve is installed."""
     print_info("Checking for DaVinci Resolve installation...")
     
-    resolve_paths = [
-        "/Applications/DaVinci Resolve/DaVinci Resolve.app",
-        "/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app",
-    ]
+    system = platform.system()
+    
+    if system == "Darwin":
+        resolve_paths = [
+            "/Applications/DaVinci Resolve/DaVinci Resolve.app",
+            "/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app",
+        ]
+    elif system == "Windows":
+        resolve_paths = [
+            "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe",
+            "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve Studio\\Resolve.exe",
+        ]
+    else:
+        return False
     
     for path in resolve_paths:
         if os.path.exists(path):
             print_success(f"Found DaVinci Resolve at: {path}")
             return True
     
-    print_error("DaVinci Resolve not found in /Applications/")
+    print_error("DaVinci Resolve not found")
     print_info("Please install DaVinci Resolve from:")
     print_info("https://www.blackmagicdesign.com/products/davinciresolve/")
     return False
@@ -181,11 +196,20 @@ def install_dependencies():
 
 def get_resolve_plugin_directory():
     """Get the DaVinci Resolve plugin directory path."""
-    # User-specific plugin directory (preferred)
-    user_plugin_dir = Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+    system = platform.system()
     
-    # System-wide plugin directory (fallback)
-    system_plugin_dir = Path("/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility")
+    if system == "Darwin":
+        # macOS paths
+        user_plugin_dir = Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+        system_plugin_dir = Path("/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility")
+    elif system == "Windows":
+        # Windows paths
+        appdata = os.getenv("APPDATA")
+        programdata = os.getenv("PROGRAMDATA")
+        user_plugin_dir = Path(appdata) / "Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility"
+        system_plugin_dir = Path(programdata) / "Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
+    else:
+        return Path.home() / "ClipABit"  # Fallback
     
     # Try user directory first
     if user_plugin_dir.exists() or not system_plugin_dir.exists():
@@ -295,8 +319,8 @@ def main():
     """Main installation function."""
     print_header("ClipABit Plugin Installer")
     
-    # Check if running on macOS
-    if not check_macos():
+    # Check if running on a supported platform
+    if not check_platform():
         sys.exit(1)
     
     # Check DaVinci Resolve installation
