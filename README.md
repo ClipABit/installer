@@ -39,4 +39,4 @@ ls -la ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion
 To do:
 Github actions setup
 Find out why it only works when you run it with sudo
-Figure out venv
+Github versioning

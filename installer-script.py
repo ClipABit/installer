@@ -215,9 +215,38 @@ def get_dependencies_from_pyproject():
             "watchdog>=3.0.0",
         ]
 
+def get_clipabit_lib_directory():
+    """Get the ClipABit library directory for Python packages."""
+    system = platform.system()
+    
+    if system == "Darwin":
+        # macOS: ~/Library/Application Support/ClipABit/lib
+        lib_dir = Path.home() / "Library/Application Support/ClipABit/lib"
+    elif system == "Windows":
+        # Windows: %APPDATA%/ClipABit/lib
+        appdata = os.getenv("APPDATA")
+        lib_dir = Path(appdata) / "ClipABit/lib"
+    else:
+        # Fallback
+        lib_dir = Path.home() / ".clipabit/lib"
+    
+    return lib_dir
+
+
 def install_dependencies():
-    """Install required Python packages."""
+    """Install required Python packages to ClipABit library directory."""
     print_info("Installing Python dependencies...")
+    
+    # Get the target library directory
+    lib_dir = get_clipabit_lib_directory()
+    
+    # Create the library directory
+    try:
+        lib_dir.mkdir(parents=True, exist_ok=True)
+        print_success(f"Library directory: {lib_dir}")
+    except Exception as e:
+        print_error(f"Failed to create library directory: {e}")
+        return False
     
     dependencies = get_dependencies_from_pyproject()
     
@@ -229,7 +258,7 @@ def install_dependencies():
         print_info(f"Installing {dep}...")
         try:
             subprocess.run(
-                ["python3", "-m", "pip", "install", "--upgrade", dep],
+                ["python3", "-m", "pip", "install", "--target", str(lib_dir), "--upgrade", dep],
                 check=True,
                 capture_output=True
             )
@@ -238,6 +267,17 @@ def install_dependencies():
             print_error(f"Failed to install {dep}")
             print_error(f"Error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
             return False
+    
+    # Create a .pth file in the plugin directory to add lib to Python path
+    plugin_dir = get_resolve_plugin_directory() / "ClipABit"
+    try:
+        plugin_dir.mkdir(parents=True, exist_ok=True)
+        pth_file = plugin_dir / "clipabit_deps.pth"
+        with open(pth_file, 'w') as f:
+            f.write(str(lib_dir) + '\n')
+        print_success(f"Created path file: {pth_file}")
+    except Exception as e:
+        print_warning(f"Could not create .pth file: {e}")
     
     print_success("All dependencies installed successfully.")
     return True
