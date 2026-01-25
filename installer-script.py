@@ -258,7 +258,11 @@ def install_dependencies():
         print_info(f"Installing {dep}...")
         try:
             subprocess.run(
-                ["python3", "-m", "pip", "install", "--target", str(lib_dir), "--upgrade", dep],
+                ["python3", "-m", "pip", "install", 
+                 "--target", str(lib_dir), 
+                 "--no-user", # Doesn't install directly to user local package dir
+                 "--no-cache-dir", # Won't download to cache of pip packages that are copies
+                 dep],
                 check=True,
                 capture_output=True
             )
