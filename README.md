@@ -10,6 +10,7 @@ uv venv
 In order to build the package, turn build-pkg.sh and postinstall into an executable, and run it:
 
 ```bash
+cd ../..
 chmod +x build-pkg.sh scripts/postinstall
 ./build-pkg.sh
 ```
@@ -34,6 +35,7 @@ Check if the plugin was installed successfully:
 ```bash
 # Check if plugin directory exists
 ls -la ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion/Scripts/Utility/ClipABit/
+ls -la ~/Library/Application\ Support/ClipABit/lib
 ```
 
 To do:
