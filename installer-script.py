@@ -272,17 +272,6 @@ def install_dependencies():
             print_error(f"Error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
             return False
     
-    # Create a .pth file in the plugin directory to add lib to Python path
-    plugin_dir = get_resolve_plugin_directory() / "ClipABit"
-    try:
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        pth_file = plugin_dir / "clipabit_deps.pth"
-        with open(pth_file, 'w') as f:
-            f.write(str(lib_dir) + '\n')
-        print_success(f"Created path file: {pth_file}")
-    except Exception as e:
-        print_warning(f"Could not create .pth file: {e}")
-    
     print_success("All dependencies installed successfully.")
     return True
 
