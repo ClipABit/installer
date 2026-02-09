@@ -1,0 +1,126 @@
+name: Build ClipABit Installers
+
+on:
+  push:
+    branches:
+      - main
+      - staging
+    paths:
+      - "installer/**"
+      - "frontend/plugin/**"
+      - ".github/workflows/build-installers.yml"
+  workflow_dispatch:
+  release:
+    types: [created, published]
+
+jobs:
+  build-macos:
+    name: Build macOS Installer
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull Resolve-Plugin repository (latest release)
+        run: |
+          LATEST_RELEASE=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+          curl -L -o plugin.zip https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_RELEASE}.zip
+          unzip -q plugin.zip
+          rm -rf frontend/plugin
+          mv Resolve-Plugin-${LATEST_RELEASE#v} frontend/plugin
+          rm plugin.zip
+
+      - name: Setup Python
+        uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+          pip install tomli
+
+      - name: Make scripts executable
+        run: |
+          cd installer
+          chmod +x build-pkg.sh scripts/postinstall
+
+      - name: Build macOS package
+        run: |
+          cd installer
+          ./build-pkg.sh
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-macOS
+          path: installer/dist/ClipABit.pkg
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull Resolve-Plugin repository (latest release)
+        run: |
+          $latestRelease = (Invoke-RestMethod -Uri "https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest").tag_name
+          $downloadUrl = "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/$latestRelease.zip"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile plugin.zip
+          Expand-Archive -Path plugin.zip -DestinationPath .
+          Remove-Item -Recurse -Force frontend/plugin -ErrorAction SilentlyContinue
+          $extractedFolder = Get-ChildItem -Directory | Where-Object { $_.Name -like "Resolve-Plugin-*" } | Select-Object -First 1
+          Move-Item $extractedFolder.FullName frontend/plugin
+          Remove-Item plugin.zip
+
+      - name: Setup Python
+        uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install PyInstaller and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller tomli
+
+      - name: Build Windows executable with PyInstaller
+        run: |
+          cd installer
+          pyinstaller clipabit-installer.spec
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-Windows
+          path: installer/dist/ClipABit-Installer.exe
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          files: |
+            artifacts/ClipABit-Installer-macOS/ClipABit.pkg
+            artifacts/ClipABit-Installer-Windows/ClipABit-Installer.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
