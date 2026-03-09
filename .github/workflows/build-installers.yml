@@ -1,19 +1,6 @@
 name: Build ClipABit Installers
 
 on:
-  push:
-    branches:
-      - main
-      - staging
-    paths:
-      - "build-pkg.sh"
-      - "build-exe.bat"
-      - "installer-script.py"
-      - "clipabit-installer.spec"
-      - "components.plist"
-      - "post-install-scripts/**"
-      - "plugin/**"
-      - ".github/workflows/build-installers.yml"
   workflow_dispatch:
     inputs:
       resolve_plugin_tag:
