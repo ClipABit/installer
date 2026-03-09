@@ -177,7 +177,11 @@ def check_pip_installation():
 def get_dependencies_from_pyproject():
     """Read dependencies from pyproject.toml."""
     script_dir = Path(__file__).parent.absolute()
-    pyproject_path = script_dir / "frontend/plugin/pyproject.toml"
+    pyproject_path = script_dir / "plugin/pyproject.toml"
+
+    if not pyproject_path.exists():
+        # Backward compatibility while transitioning to root-level plugin directory.
+        pyproject_path = script_dir / "frontend/plugin/pyproject.toml"
     
     if not pyproject_path.exists():
         print_warning(f"pyproject.toml not found at {pyproject_path}")
@@ -306,7 +310,11 @@ def copy_plugin_files():
     
     # Get the directory where this script is located
     script_dir = Path(__file__).parent.absolute()
-    plugin_source = script_dir / "frontend/plugin"
+    plugin_source = script_dir / "plugin"
+
+    if not plugin_source.exists():
+        # Backward compatibility while transitioning to root-level plugin directory.
+        plugin_source = script_dir / "frontend/plugin"
     
     if not plugin_source.exists():
         print_error(f"Plugin source directory not found: {plugin_source}")

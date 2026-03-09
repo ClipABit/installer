@@ -37,7 +37,17 @@ mkdir -p "${SCRIPTS_DIR}"
 # Copy installer files to payload
 echo "Copying installer files..."
 cp "${SCRIPT_DIR}/installer-script.py" "${PAYLOAD_DIR}/ClipABit/"
-cp -r "${SCRIPT_DIR}/frontend" "${PAYLOAD_DIR}/ClipABit/"
+
+if [ -d "${SCRIPT_DIR}/plugin" ]; then
+    cp -r "${SCRIPT_DIR}/plugin" "${PAYLOAD_DIR}/ClipABit/"
+elif [ -d "${SCRIPT_DIR}/frontend/plugin" ]; then
+    # Backward compatibility while transitioning to root-level plugin directory.
+    mkdir -p "${PAYLOAD_DIR}/ClipABit/frontend"
+    cp -r "${SCRIPT_DIR}/frontend/plugin" "${PAYLOAD_DIR}/ClipABit/frontend/"
+else
+    echo "✗ Error: Plugin directory not found (expected ./plugin or ./frontend/plugin)"
+    exit 1
+fi
 
 # Make postinstall script executable
 echo "Setting script permissions..."
