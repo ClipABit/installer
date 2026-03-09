@@ -339,7 +339,28 @@ def copy_plugin_files():
     
     # Copy plugin files
     try:
-        shutil.copytree(plugin_source, plugin_target)
+        plugin_target.mkdir(parents=True, exist_ok=True)
+
+        # Copy main plugin entry file
+        main_source = plugin_source / "clipabit.py"
+        if not main_source.exists():
+            print_error(f"Required file not found: {main_source}")
+            return False
+
+        main_target = plugin_target / "clipabit.py"
+        shutil.copy2(main_source, main_target)
+
+        # Copy selected plugin folders when available
+        for folder_name in ["assets", "clipabit", "scripts"]:
+            source_folder = plugin_source / folder_name
+            target_folder = plugin_target / folder_name
+
+            if source_folder.exists() and source_folder.is_dir():
+                shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
+                print_success(f"Copied folder: {folder_name}")
+            else:
+                print_warning(f"Optional folder not found, skipping: {source_folder}")
+
         print_success(f"Plugin files copied to: {plugin_target}")
         
         # Make the main plugin file executable
