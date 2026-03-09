@@ -6,8 +6,13 @@ on:
       - main
       - staging
     paths:
-      - "installer/**"
-      - "frontend/plugin/**"
+      - "build-pkg.sh"
+      - "build-exe.bat"
+      - "installer-script.py"
+      - "clipabit-installer.spec"
+      - "components.plist"
+      - "post-install-scripts/**"
+      - "plugin/**"
       - ".github/workflows/build-installers.yml"
   workflow_dispatch:
   release:
@@ -25,11 +30,54 @@ jobs:
       - name: Pull Resolve-Plugin repository (latest release)
         run: |
           LATEST_RELEASE=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
-          curl -L -o plugin.zip https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_RELEASE}.zip
-          unzip -q plugin.zip
-          rm -rf frontend/plugin
-          mv Resolve-Plugin-${LATEST_RELEASE#v} frontend/plugin
-          rm plugin.zip
+          TEMP_DIR=$(mktemp -d)
+          curl -L -o "$TEMP_DIR/plugin.zip" "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_RELEASE}.zip"
+          unzip -q "$TEMP_DIR/plugin.zip" -d "$TEMP_DIR"
+
+          ARCHIVE_ROOT=$(find "$TEMP_DIR" -mindepth 1 -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
+          if [ -z "$ARCHIVE_ROOT" ]; then
+            echo "Could not find extracted Resolve-Plugin root folder."
+            exit 1
+          fi
+
+          if [ ! -f "$ARCHIVE_ROOT/clipabit.py" ]; then
+            echo "clipabit.py not found in archive root: $ARCHIVE_ROOT"
+            exit 1
+          fi
+
+          rm -rf plugin
+          mkdir -p plugin
+          cp "$ARCHIVE_ROOT/clipabit.py" plugin/
+
+          for d in clipabit assets scripts; do
+            if [ -d "$ARCHIVE_ROOT/$d" ]; then
+              cp -R "$ARCHIVE_ROOT/$d" plugin/
+            else
+              echo "Required directory not found in archive root: $d"
+              exit 1
+            fi
+          done
+
+          rm -rf "$TEMP_DIR"
+
+      - name: Validate plugin folder structure
+        run: |
+          if [ ! -f plugin/clipabit.py ]; then
+            echo "Expected plugin entrypoint not found in plugin"
+            exit 1
+          fi
+
+          for d in clipabit assets scripts; do
+            if [ ! -d "plugin/$d" ]; then
+              echo "Expected plugin directory missing: plugin/$d"
+              exit 1
+            fi
+          done
+
+          if [ ! -f plugin/__init__.py ] && [ ! -f plugin/clipabit.py ]; then
+            echo "Expected plugin module markers not found in plugin"
+            exit 1
+          fi
 
       - name: Setup Python
         uses: actions/setup-python@v6.1.0
@@ -43,19 +91,17 @@ jobs:
 
       - name: Make scripts executable
         run: |
-          cd installer
-          chmod +x build-pkg.sh scripts/postinstall
+          chmod +x build-pkg.sh post-install-scripts/postinstall
 
       - name: Build macOS package
         run: |
-          cd installer
           ./build-pkg.sh
 
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
         with:
           name: ClipABit-Installer-macOS
-          path: installer/dist/ClipABit.pkg
+          path: dist/ClipABit.pkg
           retention-days: 30
 
   build-windows:
@@ -70,12 +116,51 @@ jobs:
         run: |
           $latestRelease = (Invoke-RestMethod -Uri "https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest").tag_name
           $downloadUrl = "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/$latestRelease.zip"
-          Invoke-WebRequest -Uri $downloadUrl -OutFile plugin.zip
-          Expand-Archive -Path plugin.zip -DestinationPath .
-          Remove-Item -Recurse -Force frontend/plugin -ErrorAction SilentlyContinue
-          $extractedFolder = Get-ChildItem -Directory | Where-Object { $_.Name -like "Resolve-Plugin-*" } | Select-Object -First 1
-          Move-Item $extractedFolder.FullName frontend/plugin
-          Remove-Item plugin.zip
+          $tempDir = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name ("plugin-" + [guid]::NewGuid())
+          $zipPath = Join-Path $tempDir.FullName "plugin.zip"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $tempDir.FullName
+
+          $archiveRoot = Get-ChildItem -Path $tempDir.FullName -Directory | Where-Object { $_.Name -like "Resolve-Plugin-*" } | Select-Object -First 1
+          if (-not $archiveRoot) {
+            throw "Could not find extracted Resolve-Plugin root folder."
+          }
+
+          $entryFile = Join-Path $archiveRoot.FullName "clipabit.py"
+          if (!(Test-Path $entryFile)) {
+            throw "clipabit.py not found in archive root: $($archiveRoot.FullName)"
+          }
+
+          Remove-Item -Recurse -Force plugin -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path plugin -Force | Out-Null
+          Copy-Item -Path $entryFile -Destination plugin -Force
+
+          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+            $sourceDir = Join-Path $archiveRoot.FullName $dirName
+            if (!(Test-Path $sourceDir)) {
+              throw "Required directory not found in archive root: $dirName"
+            }
+
+            Copy-Item -Path $sourceDir -Destination plugin -Recurse -Force
+          }
+
+          Remove-Item -Recurse -Force $tempDir.FullName
+
+      - name: Validate plugin folder structure
+        run: |
+          if (!(Test-Path "plugin/clipabit.py")) {
+            throw "Expected plugin entrypoint not found in plugin"
+          }
+
+          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+            if (!(Test-Path "plugin/$dirName")) {
+              throw "Expected plugin directory missing: plugin/$dirName"
+            }
+          }
+
+          if (!(Test-Path "plugin/__init__.py") -and !(Test-Path "plugin/clipabit.py")) {
+            throw "Expected plugin module markers not found in plugin"
+          }
 
       - name: Setup Python
         uses: actions/setup-python@v6.1.0
@@ -90,14 +175,13 @@ jobs:
 
       - name: Build Windows executable with PyInstaller
         run: |
-          cd installer
           pyinstaller clipabit-installer.spec
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4
         with:
           name: ClipABit-Installer-Windows
-          path: installer/dist/ClipABit-Installer.exe
+          path: dist/ClipABit-Installer.exe
           retention-days: 30
 
   create-release:
