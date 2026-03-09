@@ -16,7 +16,7 @@ INSTALL_LOCATION="/tmp/clipabit-staging"
 SCRIPT_DIR="$( cd "$( dirname "${BASH_SOURCE[0]}" )" && pwd )"
 BUILD_DIR="${SCRIPT_DIR}/build"
 PAYLOAD_DIR="${BUILD_DIR}/payload"
-SCRIPTS_DIR="${SCRIPT_DIR}/scripts"
+SCRIPTS_DIR="${SCRIPT_DIR}/post-install-scripts"
 OUTPUT_DIR="${SCRIPT_DIR}/dist"
 
 echo "=================================="
