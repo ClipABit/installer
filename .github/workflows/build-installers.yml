@@ -52,6 +52,7 @@ jobs:
           rm -rf plugin
           mkdir -p plugin
           cp "$ARCHIVE_ROOT/clipabit.py" plugin/
+          cp "$ARCHIVE_ROOT/pyproject.toml" plugin/
 
           for d in clipabit assets scripts; do
             if [ -d "$ARCHIVE_ROOT/$d" ]; then
@@ -71,17 +72,17 @@ jobs:
             exit 1
           fi
 
+          if [ ! -f plugin/pyproject.toml ]; then
+            echo "Expected plugin pyproject.toml not found in plugin"
+            exit 1
+          fi
+
           for d in clipabit assets scripts; do
             if [ ! -d "plugin/$d" ]; then
               echo "Expected plugin directory missing: plugin/$d"
               exit 1
             fi
           done
-
-          if [ ! -f plugin/__init__.py ] && [ ! -f plugin/clipabit.py ]; then
-            echo "Expected plugin module markers not found in plugin"
-            exit 1
-          fi
 
       - name: Setup Python
         uses: actions/setup-python@v6.1.0
@@ -91,13 +92,17 @@ jobs:
       - name: Install dependencies
         run: |
           python3 -m pip install --upgrade pip
-          pip install tomli
 
       - name: Make scripts executable
         run: |
           chmod +x build-pkg.sh post-install-scripts/postinstall
 
       - name: Build macOS package
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
         run: |
           ./build-pkg.sh
 
@@ -149,6 +154,12 @@ jobs:
           New-Item -ItemType Directory -Path plugin -Force | Out-Null
           Copy-Item -Path $entryFile -Destination plugin -Force
 
+          $pyprojectFile = Join-Path $archiveRoot.FullName "pyproject.toml"
+          if (!(Test-Path $pyprojectFile)) {
+            throw "pyproject.toml not found in archive root: $($archiveRoot.FullName)"
+          }
+          Copy-Item -Path $pyprojectFile -Destination plugin -Force
+
           foreach ($dirName in @("clipabit", "assets", "scripts")) {
             $sourceDir = Join-Path $archiveRoot.FullName $dirName
             if (!(Test-Path $sourceDir)) {
@@ -166,14 +177,14 @@ jobs:
             throw "Expected plugin entrypoint not found in plugin"
           }
 
+          if (!(Test-Path "plugin/pyproject.toml")) {
+            throw "Expected plugin pyproject.toml not found in plugin"
+          }
+
           foreach ($dirName in @("clipabit", "assets", "scripts")) {
             if (!(Test-Path "plugin/$dirName")) {
               throw "Expected plugin directory missing: plugin/$dirName"
             }
-          }
-
-          if (!(Test-Path "plugin/__init__.py") -and !(Test-Path "plugin/clipabit.py")) {
-            throw "Expected plugin module markers not found in plugin"
           }
 
       - name: Setup Python
@@ -185,9 +196,14 @@ jobs:
       - name: Install PyInstaller and dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller tomli
+          pip install pyinstaller
 
       - name: Build Windows executable with PyInstaller
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
         run: |
           pyinstaller clipabit-installer.spec
 

@@ -14,7 +14,7 @@ a = Analysis(
     datas=[
         ('plugin', 'plugin'),
     ],
-    hiddenimports=['tomli', 'tomllib'],
+    hiddenimports=['tomllib'],
     hookspath=[],
     hooksconfig={},
     runtime_hooks=[],
