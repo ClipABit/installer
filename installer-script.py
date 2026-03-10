@@ -130,9 +130,24 @@ def decode_config(encoded: str, key: str = OBFUSCATION_KEY) -> dict:
 # ---------------------------------------------------------------------------
 
 def get_python_cmd() -> str:
+    """Return the Python command name for the current platform."""
     if platform.system() == "Windows":
         return "python"
     return "python3"
+
+
+# Resolved interpreter path; set by check_python() so all subprocess calls use the same interpreter.
+_python_exe: str | None = None
+
+
+def get_python_exe() -> str:
+    """Return the resolved Python executable path. Use this for subprocess calls after check_python()."""
+    global _python_exe
+    if _python_exe is not None:
+        return _python_exe
+    cmd = get_python_cmd()
+    exe = shutil.which(cmd)
+    return exe or cmd
 
 
 def get_resolve_directories():
@@ -200,12 +215,14 @@ def check_davinci_resolve():
 
 
 def check_python():
+    global _python_exe
     print_info("Checking Python installation...")
     cmd = get_python_cmd()
     exe = shutil.which(cmd)
     if not exe:
         print_error(f"'{cmd}' not found in PATH.")
         return False
+    _python_exe = exe
     print_success(f"Found: {exe}")
 
     try:
@@ -226,10 +243,10 @@ def check_python():
 
 def check_pip():
     print_info("Checking pip...")
-    cmd = get_python_cmd()
+    exe = get_python_exe()
     try:
         result = subprocess.run(
-            [cmd, "-m", "pip", "--version"],
+            [exe, "-m", "pip", "--version"],
             capture_output=True, text=True, check=True,
         )
         print_success(f"pip: {result.stdout.strip()}")
@@ -237,7 +254,7 @@ def check_pip():
     except subprocess.CalledProcessError:
         print_warning("pip not found, trying ensurepip...")
         try:
-            subprocess.run([cmd, "-m", "ensurepip", "--default-pip"], check=True)
+            subprocess.run([exe, "-m", "ensurepip", "--default-pip"], check=True)
             print_success("pip installed via ensurepip.")
             return True
         except subprocess.CalledProcessError:
@@ -260,10 +277,16 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         api_url = f"https://api.github.com/repos/{PLUGIN_GITHUB_REPO}/releases/latest"
         try:
             req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
-            with urllib.request.urlopen(req) as resp:
+            with urllib.request.urlopen(req, timeout=30) as resp:
                 data = json.loads(resp.read().decode())
                 tag = data["tag_name"]
                 print_info(f"Latest release: {tag}")
+        except urllib.error.URLError as e:
+            if "timed out" in str(e).lower():
+                print_error("Request to GitHub API timed out. Check your network and try again.")
+            else:
+                print_error(f"Failed to fetch latest release: {e}")
+            return False
         except Exception as e:
             print_error(f"Failed to fetch latest release: {e}")
             return False
@@ -273,13 +296,32 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         zip_path = Path(tmp) / "plugin.zip"
         try:
             print_info(f"Downloading {archive_url}...")
-            urllib.request.urlretrieve(archive_url, zip_path)
+            req = urllib.request.Request(archive_url)
+            with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, "wb") as f:
+                shutil.copyfileobj(resp, f)
+        except urllib.error.URLError as e:
+            if "timed out" in str(e).lower():
+                print_error("Download timed out. Check your network and try again.")
+            else:
+                print_error(f"Download failed: {e}")
+            return False
         except Exception as e:
             print_error(f"Download failed: {e}")
             return False
 
         with zipfile.ZipFile(zip_path, "r") as zf:
-            zf.extractall(tmp)
+            tmp_path = Path(tmp)
+            for info in zf.infolist():
+                # Guard against zip-slip: ensure no path traversal
+                name = info.filename
+                if ".." in name or name.startswith("/") or (name.startswith("\\") and ".." in name):
+                    print_error(f"Rejecting unsafe archive member: {name}")
+                    return False
+                dest = (tmp_path / name).resolve()
+                if not str(dest).startswith(str(tmp_path.resolve())):
+                    print_error(f"Rejecting path traversal: {name}")
+                    return False
+                zf.extract(info, tmp)
 
         # Find the extracted root (Resolve-Plugin-<tag>)
         roots = [d for d in Path(tmp).iterdir() if d.is_dir() and d.name.startswith("Resolve-Plugin")]
@@ -288,7 +330,7 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
             return False
         archive_root = roots[0]
 
-        # Validate
+        # Validate required files
         if not (archive_root / "clipabit.py").exists():
             print_error("clipabit.py not found in release archive.")
             return False
@@ -300,13 +342,17 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         plugin_dir.mkdir(parents=True)
 
         shutil.copy2(archive_root / "clipabit.py", plugin_dir / "clipabit.py")
-        for folder in ["clipabit", "assets", "scripts"]:
+        for folder in ["clipabit", "scripts"]:
             src = archive_root / folder
             if src.is_dir():
                 shutil.copytree(src, plugin_dir / folder)
             else:
                 print_error(f"Required directory missing from release: {folder}")
                 return False
+        # Copy top-level assets if present (not required — plugin uses clipabit/assets/)
+        top_assets = archive_root / "assets"
+        if top_assets.is_dir():
+            shutil.copytree(top_assets, plugin_dir / "assets")
 
         # Copy pyproject.toml (required for dependency resolution)
         pyproject = archive_root / "pyproject.toml"
@@ -344,19 +390,19 @@ def get_dependencies(plugin_dir: Path) -> list[str]:
 def install_dependencies(target_dir: Path, plugin_dir: Path):
     """Install Python dependencies to target_dir."""
     print_info(f"Installing dependencies to {target_dir}...")
+    if target_dir.exists():
+        print_info("Clearing previous dependencies...")
+        shutil.rmtree(target_dir)
     target_dir.mkdir(parents=True, exist_ok=True)
 
     deps = get_dependencies(plugin_dir)
-    if not deps:
-        print_warning("No dependencies to install.")
-        return True
 
-    cmd = get_python_cmd()
+    exe = get_python_exe()
     for dep in deps:
         print_info(f"  Installing {dep}...")
         try:
             subprocess.run(
-                [cmd, "-m", "pip", "install",
+                [exe, "-m", "pip", "install",
                  "--target", str(target_dir),
                  "--no-user",
                  "--no-cache-dir",
@@ -367,7 +413,7 @@ def install_dependencies(target_dir: Path, plugin_dir: Path):
         except subprocess.CalledProcessError as e:
             print_error(f"  Failed to install {dep}")
             stderr = e.stderr.decode() if e.stderr else "Unknown error"
-            print_error(f"  {stderr[:300]}")
+            print_error(f"  {stderr}")
             return False
 
     print_success("All dependencies installed.")
@@ -441,6 +487,14 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False):
 
     print_info("Generating bootstrap shim...")
     shim_content = generate_bootstrap_shim(original_shim)
+
+    # Validate generated shim has valid Python syntax
+    try:
+        compile(shim_content, "ClipABit.py", "exec")
+    except SyntaxError as e:
+        print_error(f"Generated bootstrap shim has syntax error: {e}")
+        return False
+
     shim_target = scripts_dir / "ClipABit.py"
     scripts_dir.mkdir(parents=True, exist_ok=True)
     shim_target.write_text(shim_content, encoding="utf-8")
@@ -460,17 +514,6 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False):
     modules_dir.mkdir(parents=True, exist_ok=True)
     shutil.copytree(pkg_source, pkg_target)
     print_success(f"Plugin package installed: {pkg_target}")
-
-    # --- Copy assets to Modules/assets/ ---
-    assets_source = plugin_dir / "assets"
-    assets_target = modules_dir / "assets"
-    if assets_source.is_dir():
-        if assets_target.exists():
-            shutil.rmtree(assets_target)
-        shutil.copytree(assets_source, assets_target)
-        print_success(f"Assets installed: {assets_target}")
-    else:
-        print_warning("No assets directory found in plugin.")
 
     # --- Install dependencies to Modules/clipabit_deps/ ---
     deps_target = modules_dir / "clipabit_deps"
@@ -497,7 +540,7 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False):
 # Verification
 # ---------------------------------------------------------------------------
 
-def verify_installation():
+def verify_installation(plugin_dir: Path | None = None):
     """Verify the installation is complete and functional."""
     print_info("Verifying installation...")
     scripts_dir, modules_dir = get_resolve_directories()
@@ -527,8 +570,8 @@ def verify_installation():
         print_error(f"Dependencies missing: {deps_dir}")
         ok = False
 
-    # Assets
-    assets_dir = modules_dir / "assets"
+    # Assets (inside clipabit package, not separate)
+    assets_dir = modules_dir / "clipabit" / "assets"
     if assets_dir.is_dir():
         print_success(f"Assets: {assets_dir}")
     else:
@@ -549,22 +592,61 @@ def verify_installation():
     else:
         print_warning(f"Config missing: {config_path}")
 
-    # Import test
+    # Import test — derive import targets from pyproject.toml when available
     print_info("Running import test...")
-    cmd = get_python_cmd()
+    exe = get_python_exe()
+    # Map pip package names (or name prefixes) to Python import names
+    package_to_import = {
+        "pyqt6": "PyQt6",
+        "auth0-python": "auth0",
+        "auth0": "auth0",
+        "watchdog": "watchdog",
+        "requests": "requests",
+        "keyring": "keyring",
+    }
+    # Try the provided plugin_dir first, then fall back to script_dir/plugin/
+    pyproject_path = None
+    if plugin_dir and (plugin_dir / "pyproject.toml").exists():
+        pyproject_path = plugin_dir / "pyproject.toml"
+    else:
+        fallback = Path(__file__).parent.resolve() / "plugin" / "pyproject.toml"
+        if fallback.exists():
+            pyproject_path = fallback
+    imports = []
+    if pyproject_path:
+        try:
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            deps_raw = data.get("project", {}).get("dependencies", [])
+            seen = set()
+            for spec in deps_raw:
+                # PEP 508: package name is before ';' or '['; strip version (>=, ==, etc.)
+                name_part = spec.split(";")[0].split("[")[0].strip().lower()
+                pkg_key = name_part.split(">=")[0].split("==")[0].split("~=")[0].strip().replace("_", "-")
+                for pkg_name, import_name in package_to_import.items():
+                    if pkg_key == pkg_name or pkg_key == pkg_name.replace("_", "-"):
+                        if import_name not in seen:
+                            imports.append(import_name)
+                            seen.add(import_name)
+                        break
+        except Exception:
+            pass
+    if not imports:
+        imports = ["PyQt6", "requests", "keyring", "watchdog", "auth0"]
     test_script = (
         f"import sys; sys.path.insert(0, r'{deps_dir}'); "
-        "import PyQt6, requests, keyring; print('OK')"
+        + "; ".join(f"import {mod}" for mod in imports)
+        + "; print('OK')"
     )
     try:
         result = subprocess.run(
-            [cmd, "-c", test_script],
+            [exe, "-c", test_script],
             capture_output=True, text=True, timeout=30,
         )
         if result.returncode == 0:
             print_success("Import test passed.")
         else:
-            print_warning(f"Import test failed: {result.stderr.strip()[:200]}")
+            print_error(f"Import test failed: {result.stderr.strip()}")
             ok = False
     except Exception as e:
         print_warning(f"Import test error: {e}")
@@ -620,7 +702,7 @@ def main():
         sys.exit(1)
 
     # Verify
-    if not verify_installation():
+    if not verify_installation(plugin_dir):
         print_warning("Installation completed with warnings.")
     else:
         print_header("Installation Complete!")

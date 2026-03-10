@@ -28,14 +28,18 @@ jobs:
         run: |
           TARGET_TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
           if [ -z "$TARGET_TAG" ]; then
-            TARGET_TAG=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            TARGET_TAG=$(curl --fail -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ -z "$TARGET_TAG" ]; then
+              echo "ERROR: Failed to fetch latest release tag from GitHub API"
+              exit 1
+            fi
             echo "No explicit tag provided. Using latest Resolve-Plugin release: $TARGET_TAG"
           else
             echo "Using provided Resolve-Plugin tag: $TARGET_TAG"
           fi
 
           TEMP_DIR=$(mktemp -d)
-          curl -L -o "$TEMP_DIR/plugin.zip" "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${TARGET_TAG}.zip"
+          curl --fail -L -o "$TEMP_DIR/plugin.zip" "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${TARGET_TAG}.zip"
           unzip -q "$TEMP_DIR/plugin.zip" -d "$TEMP_DIR"
 
           ARCHIVE_ROOT=$(find "$TEMP_DIR" -mindepth 1 -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
@@ -54,7 +58,7 @@ jobs:
           cp "$ARCHIVE_ROOT/clipabit.py" plugin/
           cp "$ARCHIVE_ROOT/pyproject.toml" plugin/
 
-          for d in clipabit assets scripts; do
+          for d in clipabit scripts; do
             if [ -d "$ARCHIVE_ROOT/$d" ]; then
               cp -R "$ARCHIVE_ROOT/$d" plugin/
             else
@@ -62,6 +66,10 @@ jobs:
               exit 1
             fi
           done
+          # Copy top-level assets if present (not required — plugin uses clipabit/assets/)
+          if [ -d "$ARCHIVE_ROOT/assets" ]; then
+            cp -R "$ARCHIVE_ROOT/assets" plugin/
+          fi
 
           rm -rf "$TEMP_DIR"
 
@@ -77,7 +85,7 @@ jobs:
             exit 1
           fi
 
-          for d in clipabit assets scripts; do
+          for d in clipabit scripts; do
             if [ ! -d "plugin/$d" ]; then
               echo "Expected plugin directory missing: plugin/$d"
               exit 1
@@ -129,6 +137,9 @@ jobs:
           $targetTag = if ($env:DISPATCH_TAG) { $env:DISPATCH_TAG } elseif ($env:INPUT_TAG) { $env:INPUT_TAG } else { "" }
           if (-not $targetTag) {
             $targetTag = (Invoke-RestMethod -Uri "https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest").tag_name
+            if (-not $targetTag) {
+              throw "Failed to fetch latest release tag from GitHub API"
+            }
             Write-Host "No explicit tag provided. Using latest Resolve-Plugin release: $targetTag"
           } else {
             Write-Host "Using provided Resolve-Plugin tag: $targetTag"
@@ -160,13 +171,18 @@ jobs:
           }
           Copy-Item -Path $pyprojectFile -Destination plugin -Force
 
-          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+          foreach ($dirName in @("clipabit", "scripts")) {
             $sourceDir = Join-Path $archiveRoot.FullName $dirName
             if (!(Test-Path $sourceDir)) {
               throw "Required directory not found in archive root: $dirName"
             }
 
             Copy-Item -Path $sourceDir -Destination plugin -Recurse -Force
+          }
+          # Copy top-level assets if present (not required — plugin uses clipabit/assets/)
+          $topAssets = Join-Path $archiveRoot.FullName "assets"
+          if (Test-Path $topAssets) {
+            Copy-Item -Path $topAssets -Destination plugin -Recurse -Force
           }
 
           Remove-Item -Recurse -Force $tempDir.FullName
@@ -181,7 +197,7 @@ jobs:
             throw "Expected plugin pyproject.toml not found in plugin"
           }
 
-          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+          foreach ($dirName in @("clipabit", "scripts")) {
             if (!(Test-Path "plugin/$dirName")) {
               throw "Expected plugin directory missing: plugin/$dirName"
             }
@@ -196,7 +212,7 @@ jobs:
       - name: Install PyInstaller and dependencies
         run: |
           python -m pip install --upgrade pip
-          pip install pyinstaller
+          python -m pip install pyinstaller==6.16.0
 
       - name: Build Windows executable with PyInstaller
         env:

@@ -71,7 +71,7 @@ if [ ! -f "${PLUGIN_DIR}/pyproject.toml" ]; then
     echo "ERROR: plugin/pyproject.toml not found. Required for dependency resolution."
     exit 1
 fi
-for d in clipabit assets; do
+for d in clipabit scripts; do
     if [ ! -d "${PLUGIN_DIR}/$d" ]; then
         echo "ERROR: plugin/$d directory missing."
         exit 1
@@ -94,7 +94,15 @@ cp -R "${PLUGIN_DIR}" "${PAYLOAD_DIR}/ClipABit/plugin"
 # Template Auth0 values into postinstall
 # -------------------------------------------------------------------
 echo "Preparing postinstall script..."
-cp "${SCRIPTS_DIR}/postinstall" "${SCRIPTS_DIR}/postinstall.bak" 2>/dev/null || true
+cp "${SCRIPTS_DIR}/postinstall" "${SCRIPTS_DIR}/postinstall.bak"
+
+# Always restore postinstall from backup on exit (prevents leaking Auth0 values if pkgbuild fails)
+restore_postinstall() {
+    if [ -f "${SCRIPTS_DIR}/postinstall.bak" ]; then
+        mv "${SCRIPTS_DIR}/postinstall.bak" "${SCRIPTS_DIR}/postinstall"
+    fi
+}
+trap restore_postinstall EXIT
 
 sed -i.tmp \
     -e "s|__AUTH0_DOMAIN__|${CLIPABIT_AUTH0_DOMAIN}|g" \
@@ -102,6 +110,11 @@ sed -i.tmp \
     -e "s|__AUTH0_AUDIENCE__|${CLIPABIT_AUTH0_AUDIENCE}|g" \
     -e "s|__ENVIRONMENT__|${CLIPABIT_ENVIRONMENT}|g" \
     "${SCRIPTS_DIR}/postinstall"
+
+if [ $? -ne 0 ]; then
+    echo "ERROR: sed templating failed"
+    exit 1
+fi
 rm -f "${SCRIPTS_DIR}/postinstall.tmp"
 
 chmod +x "${SCRIPTS_DIR}/postinstall"
@@ -120,14 +133,7 @@ pkgbuild \
     "${OUTPUT_DIR}/${PKG_NAME}.pkg"
 
 # -------------------------------------------------------------------
-# Restore postinstall from backup (undo sed templating)
-# -------------------------------------------------------------------
-if [ -f "${SCRIPTS_DIR}/postinstall.bak" ]; then
-    mv "${SCRIPTS_DIR}/postinstall.bak" "${SCRIPTS_DIR}/postinstall"
-fi
-
-# -------------------------------------------------------------------
-# Done
+# Done (postinstall restore handled by EXIT trap)
 # -------------------------------------------------------------------
 if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     echo ""

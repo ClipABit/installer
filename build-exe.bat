@@ -36,7 +36,8 @@ if errorlevel 1 (
 echo.
 echo [2/5] Installing build dependencies...
 python -m pip install --upgrade pip >nul 2>&1
-pip install pyinstaller >nul 2>&1
+REM Pin PyInstaller to a vetted version to reduce supply-chain risk; update explicitly when needed
+python -m pip install pyinstaller==6.16.0 >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Failed to install build dependencies
     pause
@@ -55,6 +56,22 @@ if not exist "plugin\clipabit.py" (
     )
 ) else (
     echo      Plugin already present, skipping download
+)
+REM Validate full plugin structure regardless of download
+if not exist "plugin\pyproject.toml" (
+    echo [ERROR] plugin\pyproject.toml missing. Required for dependency resolution.
+    pause
+    exit /b 1
+)
+if not exist "plugin\clipabit" (
+    echo [ERROR] plugin\clipabit directory missing.
+    pause
+    exit /b 1
+)
+if not exist "plugin\clipabit\assets" (
+    echo [ERROR] plugin\clipabit\assets directory missing.
+    pause
+    exit /b 1
 )
 
 echo.
@@ -78,7 +95,7 @@ if exist dist\ClipABit-Installer.exe (
     for %%A in (dist\ClipABit-Installer.exe) do echo File size: %%~zA bytes
     echo.
     echo You can now distribute this .exe file.
-    echo Users do not need Python installed to run it.
+    echo Note: Users will need Python 3.12+ installed to complete the plugin setup.
     echo.
 ) else (
     echo [ERROR] Executable not found after build!
