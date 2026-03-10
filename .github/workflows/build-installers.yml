@@ -1,0 +1,233 @@
+name: Build ClipABit Installers
+
+on:
+  workflow_dispatch:
+    inputs:
+      resolve_plugin_tag:
+        description: "Optional Resolve-Plugin tag to build from (example: v1.2.3)"
+        required: false
+        type: string
+  repository_dispatch:
+    types: [resolve_plugin_release]
+  release:
+    types: [created, published]
+
+jobs:
+  build-macos:
+    name: Build macOS Installer
+    runs-on: macos-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull Resolve-Plugin repository (latest release)
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.release_tag }}
+          INPUT_TAG: ${{ github.event.inputs.resolve_plugin_tag }}
+        run: |
+          TARGET_TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            echo "No explicit tag provided. Using latest Resolve-Plugin release: $TARGET_TAG"
+          else
+            echo "Using provided Resolve-Plugin tag: $TARGET_TAG"
+          fi
+
+          TEMP_DIR=$(mktemp -d)
+          curl -L -o "$TEMP_DIR/plugin.zip" "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${TARGET_TAG}.zip"
+          unzip -q "$TEMP_DIR/plugin.zip" -d "$TEMP_DIR"
+
+          ARCHIVE_ROOT=$(find "$TEMP_DIR" -mindepth 1 -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
+          if [ -z "$ARCHIVE_ROOT" ]; then
+            echo "Could not find extracted Resolve-Plugin root folder."
+            exit 1
+          fi
+
+          if [ ! -f "$ARCHIVE_ROOT/clipabit.py" ]; then
+            echo "clipabit.py not found in archive root: $ARCHIVE_ROOT"
+            exit 1
+          fi
+
+          rm -rf plugin
+          mkdir -p plugin
+          cp "$ARCHIVE_ROOT/clipabit.py" plugin/
+
+          for d in clipabit assets scripts; do
+            if [ -d "$ARCHIVE_ROOT/$d" ]; then
+              cp -R "$ARCHIVE_ROOT/$d" plugin/
+            else
+              echo "Required directory not found in archive root: $d"
+              exit 1
+            fi
+          done
+
+          rm -rf "$TEMP_DIR"
+
+      - name: Validate plugin folder structure
+        run: |
+          if [ ! -f plugin/clipabit.py ]; then
+            echo "Expected plugin entrypoint not found in plugin"
+            exit 1
+          fi
+
+          for d in clipabit assets scripts; do
+            if [ ! -d "plugin/$d" ]; then
+              echo "Expected plugin directory missing: plugin/$d"
+              exit 1
+            fi
+          done
+
+          if [ ! -f plugin/__init__.py ] && [ ! -f plugin/clipabit.py ]; then
+            echo "Expected plugin module markers not found in plugin"
+            exit 1
+          fi
+
+      - name: Setup Python
+        uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: |
+          python3 -m pip install --upgrade pip
+
+      - name: Make scripts executable
+        run: |
+          chmod +x build-pkg.sh post-install-scripts/postinstall
+
+      - name: Build macOS package
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
+        run: |
+          ./build-pkg.sh
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-macOS
+          path: dist/ClipABit.pkg
+          retention-days: 30
+
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Pull Resolve-Plugin repository (latest release)
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.release_tag }}
+          INPUT_TAG: ${{ github.event.inputs.resolve_plugin_tag }}
+        run: |
+          $targetTag = if ($env:DISPATCH_TAG) { $env:DISPATCH_TAG } elseif ($env:INPUT_TAG) { $env:INPUT_TAG } else { "" }
+          if (-not $targetTag) {
+            $targetTag = (Invoke-RestMethod -Uri "https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest").tag_name
+            Write-Host "No explicit tag provided. Using latest Resolve-Plugin release: $targetTag"
+          } else {
+            Write-Host "Using provided Resolve-Plugin tag: $targetTag"
+          }
+
+          $downloadUrl = "https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/$targetTag.zip"
+          $tempDir = New-Item -ItemType Directory -Path ([System.IO.Path]::GetTempPath()) -Name ("plugin-" + [guid]::NewGuid())
+          $zipPath = Join-Path $tempDir.FullName "plugin.zip"
+          Invoke-WebRequest -Uri $downloadUrl -OutFile $zipPath
+          Expand-Archive -Path $zipPath -DestinationPath $tempDir.FullName
+
+          $archiveRoot = Get-ChildItem -Path $tempDir.FullName -Directory | Where-Object { $_.Name -like "Resolve-Plugin-*" } | Select-Object -First 1
+          if (-not $archiveRoot) {
+            throw "Could not find extracted Resolve-Plugin root folder."
+          }
+
+          $entryFile = Join-Path $archiveRoot.FullName "clipabit.py"
+          if (!(Test-Path $entryFile)) {
+            throw "clipabit.py not found in archive root: $($archiveRoot.FullName)"
+          }
+
+          Remove-Item -Recurse -Force plugin -ErrorAction SilentlyContinue
+          New-Item -ItemType Directory -Path plugin -Force | Out-Null
+          Copy-Item -Path $entryFile -Destination plugin -Force
+
+          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+            $sourceDir = Join-Path $archiveRoot.FullName $dirName
+            if (!(Test-Path $sourceDir)) {
+              throw "Required directory not found in archive root: $dirName"
+            }
+
+            Copy-Item -Path $sourceDir -Destination plugin -Recurse -Force
+          }
+
+          Remove-Item -Recurse -Force $tempDir.FullName
+
+      - name: Validate plugin folder structure
+        run: |
+          if (!(Test-Path "plugin/clipabit.py")) {
+            throw "Expected plugin entrypoint not found in plugin"
+          }
+
+          foreach ($dirName in @("clipabit", "assets", "scripts")) {
+            if (!(Test-Path "plugin/$dirName")) {
+              throw "Expected plugin directory missing: plugin/$dirName"
+            }
+          }
+
+          if (!(Test-Path "plugin/__init__.py") -and !(Test-Path "plugin/clipabit.py")) {
+            throw "Expected plugin module markers not found in plugin"
+          }
+
+      - name: Setup Python
+        uses: actions/setup-python@v6.1.0
+        with:
+          python-version: "3.12"
+          architecture: "x64"
+
+      - name: Install PyInstaller and dependencies
+        run: |
+          python -m pip install --upgrade pip
+          pip install pyinstaller
+
+      - name: Build Windows executable with PyInstaller
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
+        run: |
+          pyinstaller clipabit-installer.spec
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-Windows
+          path: dist/ClipABit-Installer.exe
+          retention-days: 30
+
+  create-release:
+    name: Create Release
+    needs: [build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          files: |
+            artifacts/ClipABit-Installer-macOS/ClipABit.pkg
+            artifacts/ClipABit-Installer-Windows/ClipABit-Installer.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}

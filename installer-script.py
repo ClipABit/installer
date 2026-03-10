@@ -1,7 +1,8 @@
 #!/usr/bin/env python3
 """
 ClipABit Plugin Installer for DaVinci Resolve
-This script installs the ClipABit plugin for DaVinci Resolve on macOS.
+Installs the ClipABit plugin on macOS and Windows with proper
+Auth0 configuration, dependency isolation, and bootstrap shim.
 """
 
 import sys
@@ -9,18 +10,79 @@ import os
 import subprocess
 import shutil
 import platform
+import json
+import base64
+import argparse
+import tempfile
+import urllib.request
+import urllib.error
+import zipfile
 from pathlib import Path
 
-# For reading pyproject.toml
-try:
-    import tomllib  # Python 3.11+
-except ImportError:
+import tomllib
+
+# ---------------------------------------------------------------------------
+# Constants
+# ---------------------------------------------------------------------------
+
+PLUGIN_GITHUB_REPO = "ClipABit/Resolve-Plugin"
+OBFUSCATION_KEY = "clipabit-resolve-plugin-2026"
+
+DEFAULT_DEPENDENCIES = [
+    "pyqt6>=6.10.0",
+    "requests>=2.31.0",
+    "watchdog>=3.0.0",
+    "auth0-python>=4.7.0",
+    "keyring>=24.0.0",
+]
+
+# Bootstrap preamble prepended to the original shim.
+# Double braces {{ }} are literal braces (needed for .format()).
+BOOTSTRAP_PREAMBLE = '''\
+# === ClipABit Installer Bootstrap ===
+def _clipabit_bootstrap():
+    import base64, json, os, sys
+    _KEY = "{obf_key}"
+    def _xor(data, key):
+        kb = key.encode("utf-8")
+        return bytes(b ^ kb[i % len(kb)] for i, b in enumerate(data))
+    config_locations = {{
+        "darwin": os.path.expanduser(
+            "~/Library/Application Support/ClipABit/config.dat"),
+        "win32": os.path.join(
+            os.environ.get("APPDATA", ""), "ClipABit", "config.dat"),
+    }}
+    config_path = config_locations.get(
+        sys.platform,
+        os.path.expanduser("~/.config/clipabit/config.dat"),
+    )
+    if os.path.exists(config_path):
+        try:
+            raw = open(config_path, "r").read().strip()
+            cfg = json.loads(_xor(base64.b64decode(raw), _KEY).decode("utf-8"))
+            for k, v in cfg.items():
+                os.environ.setdefault(k, str(v))
+        except Exception:
+            pass
     try:
-        import tomli as tomllib  # Fallback for Python 3.8-3.10
-    except ImportError:
-        tomllib = None
+        _sd = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        _sd = os.getcwd()
+    _deps = os.path.abspath(os.path.join(_sd, "..", "..", "Modules", "clipabit_deps"))
+    if os.path.isdir(_deps) and _deps not in sys.path:
+        sys.path.insert(0, _deps)
+_clipabit_bootstrap()
+del _clipabit_bootstrap
+# === End Installer Bootstrap ===
+
+'''
+
+
+# ---------------------------------------------------------------------------
+# Pretty-print helpers
+# ---------------------------------------------------------------------------
+
 class Colors:
-    """Terminal colors for pretty output."""
     HEADER = '\033[95m'
     OKBLUE = '\033[94m'
     OKCYAN = '\033[96m'
@@ -32,34 +94,83 @@ class Colors:
 
 
 def print_header(message):
-    """Print a header message."""
-    print(f"\n{Colors.HEADER}{Colors.BOLD}{'='*60}{Colors.ENDC}")
+    print(f"\n{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}")
     print(f"{Colors.HEADER}{Colors.BOLD}{message}{Colors.ENDC}")
-    print(f"{Colors.HEADER}{Colors.BOLD}{'='*60}{Colors.ENDC}\n")
+    print(f"{Colors.HEADER}{Colors.BOLD}{'=' * 60}{Colors.ENDC}\n")
 
 
 def print_success(message):
-    """Print a success message."""
-    print(f"{Colors.OKGREEN}✓ {message}{Colors.ENDC}")
+    print(f"{Colors.OKGREEN}  {message}{Colors.ENDC}")
 
 
 def print_error(message):
-    """Print an error message."""
-    print(f"{Colors.FAIL}✗ {message}{Colors.ENDC}")
+    print(f"{Colors.FAIL}  {message}{Colors.ENDC}")
 
 
 def print_warning(message):
-    """Print a warning message."""
-    print(f"{Colors.WARNING}⚠ {message}{Colors.ENDC}")
+    print(f"{Colors.WARNING}  {message}{Colors.ENDC}")
 
 
 def print_info(message):
-    """Print an info message."""
-    print(f"{Colors.OKCYAN}ℹ {message}{Colors.ENDC}")
+    print(f"{Colors.OKCYAN}  {message}{Colors.ENDC}")
 
+
+# ---------------------------------------------------------------------------
+# Config obfuscation
+# ---------------------------------------------------------------------------
+
+def xor_bytes(data: bytes, key: str) -> bytes:
+    kb = key.encode("utf-8")
+    return bytes(b ^ kb[i % len(kb)] for i, b in enumerate(data))
+
+
+def encode_config(config_dict: dict, key: str = OBFUSCATION_KEY) -> str:
+    raw = json.dumps(config_dict).encode("utf-8")
+    return base64.b64encode(xor_bytes(raw, key)).decode("ascii")
+
+
+def decode_config(encoded: str, key: str = OBFUSCATION_KEY) -> dict:
+    return json.loads(xor_bytes(base64.b64decode(encoded), key).decode("utf-8"))
+
+
+# ---------------------------------------------------------------------------
+# Platform helpers
+# ---------------------------------------------------------------------------
+
+def get_python_cmd() -> str:
+    if platform.system() == "Windows":
+        return "python"
+    return "python3"
+
+
+def get_resolve_directories():
+    """Return (scripts_utility_dir, modules_dir) for the current platform."""
+    system = platform.system()
+    if system == "Darwin":
+        base = Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion"
+    elif system == "Windows":
+        appdata = os.getenv("APPDATA", "")
+        base = Path(appdata) / "Blackmagic Design/DaVinci Resolve/Support/Fusion"
+    else:
+        print_error(f"Unsupported platform: {system}")
+        sys.exit(1)
+    return base / "Scripts" / "Utility", base / "Modules"
+
+
+def get_config_directory() -> Path:
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/Application Support/ClipABit"
+    elif system == "Windows":
+        return Path(os.getenv("APPDATA", "")) / "ClipABit"
+    return Path.home() / ".config" / "clipabit"
+
+
+# ---------------------------------------------------------------------------
+# Pre-flight checks
+# ---------------------------------------------------------------------------
 
 def check_platform():
-    """Check if running on a supported platform."""
     system = platform.system()
     if system == "Darwin":
         print_success(f"Running on macOS {platform.mac_ver()[0]}")
@@ -67,397 +178,465 @@ def check_platform():
     elif system == "Windows":
         print_success(f"Running on Windows {platform.version()}")
         return True
-    else:
-        print_error(f"Unsupported platform: {system}")
-        print_info("This installer supports macOS and Windows only.")
-        return False
+    print_error(f"Unsupported platform: {system}")
+    return False
 
 
 def check_davinci_resolve():
-    """Check if DaVinci Resolve is installed."""
     print_info("Checking for DaVinci Resolve installation...")
-    
     system = platform.system()
-    
     if system == "Darwin":
-        resolve_paths = [
+        paths = [
             "/Applications/DaVinci Resolve/DaVinci Resolve.app",
             "/Applications/DaVinci Resolve Studio/DaVinci Resolve Studio.app",
         ]
     elif system == "Windows":
-        resolve_paths = [
-            "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve\\Resolve.exe",
-            "C:\\Program Files\\Blackmagic Design\\DaVinci Resolve Studio\\Resolve.exe",
+        paths = [
+            r"C:\Program Files\Blackmagic Design\DaVinci Resolve\Resolve.exe",
+            r"C:\Program Files\Blackmagic Design\DaVinci Resolve Studio\Resolve.exe",
         ]
     else:
         return False
-    
-    for path in resolve_paths:
-        if os.path.exists(path):
-            print_success(f"Found DaVinci Resolve at: {path}")
+
+    for p in paths:
+        if os.path.exists(p):
+            print_success(f"Found DaVinci Resolve at: {p}")
             return True
-    
-    print_error("DaVinci Resolve not found")
-    print_info("Please install DaVinci Resolve from:")
-    print_info("https://www.blackmagicdesign.com/products/davinciresolve/")
+    print_error("DaVinci Resolve not found.")
+    print_info("Download from: https://www.blackmagicdesign.com/products/davinciresolve/")
     return False
 
 
-def check_python_installation():
-    """Check if Python is installed and accessible."""
-    print_info("Checking for Python installation...")
-    
+def check_python():
+    print_info("Checking Python installation...")
+    cmd = get_python_cmd()
+    exe = shutil.which(cmd)
+    if not exe:
+        print_error(f"'{cmd}' not found in PATH.")
+        return False
+    print_success(f"Found: {exe}")
+
     try:
-        # Check Python version
         result = subprocess.run(
-            ["python3", "--version"],
-            capture_output=True,
-            text=True,
-            check=True
+            [exe, "-c", "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,12) else 1)"],
+            capture_output=True, text=True,
         )
         version = result.stdout.strip()
-        print_success(f"Found {version}")
-        
-        # Get Python executable path
-        result = subprocess.run(
-            ["which", "python3"],
-            capture_output=True,
-            text=True,
-            check=True
-        )
-        python_path = result.stdout.strip()
-        print_success(f"Python executable: {python_path}")
-        
-        # Check if Python version is 3.8+
-        version_check = subprocess.run(
-            ["python3", "-c", "import sys; sys.exit(0 if sys.version_info >= (3, 8) else 1)"],
-            capture_output=True
-        )
-        
-        if version_check.returncode != 0:
-            print_error("Python 3.8 or higher is required.")
+        if result.returncode != 0:
+            print_error(f"Python {version} found but 3.12+ is required.")
             return False
-        
+        print_success(f"Python {version}")
         return True
-        
-    except (subprocess.CalledProcessError, FileNotFoundError):
-        print_error("Python 3 is not installed or not in PATH.")
-        print_info("Please install Python from: https://www.python.org/downloads/")
+    except Exception as e:
+        print_error(f"Python check failed: {e}")
         return False
 
 
-def check_pip_installation():
-    """Check if pip is installed."""
-    print_info("Checking for pip...")
-    
+def check_pip():
+    print_info("Checking pip...")
+    cmd = get_python_cmd()
     try:
         result = subprocess.run(
-            ["python3", "-m", "pip", "--version"],
-            capture_output=True,
-            text=True,
-            check=True
+            [cmd, "-m", "pip", "--version"],
+            capture_output=True, text=True, check=True,
         )
-        print_success(f"Found pip: {result.stdout.strip()}")
+        print_success(f"pip: {result.stdout.strip()}")
         return True
     except subprocess.CalledProcessError:
-        print_error("pip is not installed.")
-        print_info("Installing pip...")
+        print_warning("pip not found, trying ensurepip...")
         try:
-            subprocess.run(
-                ["python3", "-m", "ensurepip", "--default-pip"],
-                check=True
-            )
-            print_success("pip installed successfully.")
+            subprocess.run([cmd, "-m", "ensurepip", "--default-pip"], check=True)
+            print_success("pip installed via ensurepip.")
             return True
         except subprocess.CalledProcessError:
             print_error("Failed to install pip.")
             return False
 
 
-def get_dependencies_from_pyproject():
-    """Read dependencies from pyproject.toml."""
-    script_dir = Path(__file__).parent.absolute()
-    pyproject_path = script_dir / "frontend/plugin/pyproject.toml"
-    
-    if not pyproject_path.exists():
-        print_warning(f"pyproject.toml not found at {pyproject_path}")
-        # Fallback to hardcoded dependencies
-        return [
-            "pyqt6>=6.10.0",
-            "requests>=2.31.0",
-            "watchdog>=3.0.0",
-        ]
-    
-    # Try to parse pyproject.toml
-    if tomllib is None:
-        print_warning("TOML parser not available, using fallback dependencies")
-        return [
-            "pyqt6>=6.10.0",
-            "requests>=2.31.0",
-            "watchdog>=3.0.0",
-        ]
-    
-    try:
-        with open(pyproject_path, "rb") as f:
-            data = tomllib.load(f)
-            dependencies = data.get("project", {}).get("dependencies", [])
-            if dependencies:
-                print_success(f"Loaded {len(dependencies)} dependencies from pyproject.toml")
-                return dependencies
-            else:
-                print_warning("No dependencies found in pyproject.toml")
-                return []
-    except Exception as e:
-        print_error(f"Failed to read pyproject.toml: {e}")
-        return [
-            "pyqt6>=6.10.0",
-            "requests>=2.31.0",
-            "watchdog>=3.0.0",
-        ]
+# ---------------------------------------------------------------------------
+# Plugin download
+# ---------------------------------------------------------------------------
 
-def get_clipabit_lib_directory():
-    """Get the ClipABit library directory for Python packages."""
-    system = platform.system()
-    
-    if system == "Darwin":
-        # macOS: ~/Library/Application Support/ClipABit/lib
-        lib_dir = Path.home() / "Library/Application Support/ClipABit/lib"
-    elif system == "Windows":
-        # Windows: %APPDATA%/ClipABit/lib
-        appdata = os.getenv("APPDATA")
-        lib_dir = Path(appdata) / "ClipABit/lib"
+def download_plugin_release(staging_dir: Path, tag: str | None = None):
+    """Download and extract the plugin from a GitHub release."""
+    print_info(f"Downloading plugin from {PLUGIN_GITHUB_REPO}...")
+
+    if tag:
+        archive_url = f"https://github.com/{PLUGIN_GITHUB_REPO}/archive/refs/tags/{tag}.zip"
+        print_info(f"Using tag: {tag}")
     else:
-        # Fallback
-        lib_dir = Path.home() / ".clipabit/lib"
-    
-    return lib_dir
-
-
-def install_dependencies():
-    """Install required Python packages to ClipABit library directory."""
-    print_info("Installing Python dependencies...")
-    
-    # Get the target library directory
-    lib_dir = get_clipabit_lib_directory()
-    
-    # Create the library directory
-    try:
-        lib_dir.mkdir(parents=True, exist_ok=True)
-        print_success(f"Library directory: {lib_dir}")
-    except Exception as e:
-        print_error(f"Failed to create library directory: {e}")
-        return False
-    
-    dependencies = get_dependencies_from_pyproject()
-    
-    if not dependencies:
-        print_warning("No dependencies to install.")
-        return True
-    
-    for dep in dependencies:
-        print_info(f"Installing {dep}...")
+        api_url = f"https://api.github.com/repos/{PLUGIN_GITHUB_REPO}/releases/latest"
         try:
-            subprocess.run(
-                ["python3", "-m", "pip", "install", 
-                 "--target", str(lib_dir), 
-                 "--no-user", # Doesn't install directly to user local package dir
-                 "--no-cache-dir", # Won't download to cache of pip packages that are copies
-                 dep],
-                check=True,
-                capture_output=True
-            )
-            print_success(f"Installed {dep}")
-        except subprocess.CalledProcessError as e:
-            print_error(f"Failed to install {dep}")
-            print_error(f"Error: {e.stderr.decode() if e.stderr else 'Unknown error'}")
+            req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
+            with urllib.request.urlopen(req) as resp:
+                data = json.loads(resp.read().decode())
+                tag = data["tag_name"]
+                print_info(f"Latest release: {tag}")
+        except Exception as e:
+            print_error(f"Failed to fetch latest release: {e}")
             return False
-    
-    print_success("All dependencies installed successfully.")
+        archive_url = f"https://github.com/{PLUGIN_GITHUB_REPO}/archive/refs/tags/{tag}.zip"
+
+    with tempfile.TemporaryDirectory() as tmp:
+        zip_path = Path(tmp) / "plugin.zip"
+        try:
+            print_info(f"Downloading {archive_url}...")
+            urllib.request.urlretrieve(archive_url, zip_path)
+        except Exception as e:
+            print_error(f"Download failed: {e}")
+            return False
+
+        with zipfile.ZipFile(zip_path, "r") as zf:
+            zf.extractall(tmp)
+
+        # Find the extracted root (Resolve-Plugin-<tag>)
+        roots = [d for d in Path(tmp).iterdir() if d.is_dir() and d.name.startswith("Resolve-Plugin")]
+        if not roots:
+            print_error("Could not find extracted plugin root directory.")
+            return False
+        archive_root = roots[0]
+
+        # Validate
+        if not (archive_root / "clipabit.py").exists():
+            print_error("clipabit.py not found in release archive.")
+            return False
+
+        # Clear and populate staging_dir/plugin/
+        plugin_dir = staging_dir / "plugin"
+        if plugin_dir.exists():
+            shutil.rmtree(plugin_dir)
+        plugin_dir.mkdir(parents=True)
+
+        shutil.copy2(archive_root / "clipabit.py", plugin_dir / "clipabit.py")
+        for folder in ["clipabit", "assets", "scripts"]:
+            src = archive_root / folder
+            if src.is_dir():
+                shutil.copytree(src, plugin_dir / folder)
+            else:
+                print_error(f"Required directory missing from release: {folder}")
+                return False
+
+        # Copy pyproject.toml if present
+        pyproject = archive_root / "pyproject.toml"
+        if pyproject.exists():
+            shutil.copy2(pyproject, plugin_dir / "pyproject.toml")
+
+    print_success("Plugin downloaded and staged.")
     return True
 
 
-def get_resolve_plugin_directory():
-    """Get the DaVinci Resolve plugin directory path."""
-    system = platform.system()
-    
-    if system == "Darwin":
-        # macOS paths
-        user_plugin_dir = Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
-        system_plugin_dir = Path("/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility")
-    elif system == "Windows":
-        # Windows paths
-        appdata = os.getenv("APPDATA")
-        programdata = os.getenv("PROGRAMDATA")
-        user_plugin_dir = Path(appdata) / "Blackmagic Design/DaVinci Resolve/Support/Fusion/Scripts/Utility"
-        system_plugin_dir = Path(programdata) / "Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility"
-    else:
-        return Path.home() / "ClipABit"  # Fallback
-    
-    # Try user directory first
-    if user_plugin_dir.exists() or not system_plugin_dir.exists():
-        return user_plugin_dir
-    
-    return system_plugin_dir
+# ---------------------------------------------------------------------------
+# Dependency helpers
+# ---------------------------------------------------------------------------
 
-
-def copy_plugin_files():
-    """Copy the plugin files to the DaVinci Resolve plugin directory."""
-    print_info("Installing ClipABit plugin...")
-    
-    # Get the directory where this script is located
-    script_dir = Path(__file__).parent.absolute()
-    plugin_source = script_dir / "frontend/plugin"
-    
-    if not plugin_source.exists():
-        print_error(f"Plugin source directory not found: {plugin_source}")
-        return False
-    
-    # Get target directory
-    plugin_dir = get_resolve_plugin_directory()
-    plugin_target = plugin_dir / "ClipABit"
-    
-    print_info(f"Source: {plugin_source}")
-    print_info(f"Target: {plugin_target}")
-    
-    # Create target directory if it doesn't exist
-    try:
-        plugin_dir.mkdir(parents=True, exist_ok=True)
-        print_success(f"Plugin directory ready: {plugin_dir}")
-    except Exception as e:
-        print_error(f"Failed to create plugin directory: {e}")
-        return False
-    
-    # Remove existing installation if present
-    if plugin_target.exists():
-        print_warning("Existing ClipABit installation found. Removing...")
+def get_dependencies(plugin_dir: Path) -> list[str]:
+    """Read dependencies from pyproject.toml, with fallback."""
+    pyproject_path = plugin_dir / "pyproject.toml"
+    if pyproject_path.exists():
         try:
-            shutil.rmtree(plugin_target)
-            print_success("Removed existing installation.")
+            with open(pyproject_path, "rb") as f:
+                data = tomllib.load(f)
+            deps = data.get("project", {}).get("dependencies", [])
+            if deps:
+                print_success(f"Loaded {len(deps)} dependencies from pyproject.toml")
+                return deps
         except Exception as e:
-            print_error(f"Failed to remove existing installation: {e}")
-            return False
-    
-    # Copy plugin files
-    try:
-        plugin_target.mkdir(parents=True, exist_ok=True)
+            print_warning(f"Failed to read pyproject.toml: {e}")
+    print_warning("Using default dependency list.")
+    return list(DEFAULT_DEPENDENCIES)
 
-        # Copy main plugin entry file
-        main_source = plugin_source / "clipabit.py"
-        if not main_source.exists():
-            print_error(f"Required file not found: {main_source}")
-            return False
 
-        main_target = plugin_target / "clipabit.py"
-        shutil.copy2(main_source, main_target)
+def install_dependencies(target_dir: Path, plugin_dir: Path):
+    """Install Python dependencies to target_dir."""
+    print_info(f"Installing dependencies to {target_dir}...")
+    target_dir.mkdir(parents=True, exist_ok=True)
 
-        # Copy selected plugin folders when available
-        for folder_name in ["assets", "clipabit", "scripts"]:
-            source_folder = plugin_source / folder_name
-            target_folder = plugin_target / folder_name
-
-            if source_folder.exists() and source_folder.is_dir():
-                shutil.copytree(source_folder, target_folder, dirs_exist_ok=True)
-                print_success(f"Copied folder: {folder_name}")
-            else:
-                print_warning(f"Optional folder not found, skipping: {source_folder}")
-
-        print_success(f"Plugin files copied to: {plugin_target}")
-        
-        # Make the main plugin file executable
-        main_plugin = plugin_target / "clipabit.py"
-        if main_plugin.exists():
-            os.chmod(main_plugin, 0o755)
-            print_success("Plugin file permissions set.")
-        
+    deps = get_dependencies(plugin_dir)
+    if not deps:
+        print_warning("No dependencies to install.")
         return True
-    except Exception as e:
-        print_error(f"Failed to copy plugin files: {e}")
+
+    cmd = get_python_cmd()
+    for dep in deps:
+        print_info(f"  Installing {dep}...")
+        try:
+            subprocess.run(
+                [cmd, "-m", "pip", "install",
+                 "--target", str(target_dir),
+                 "--no-user",
+                 "--no-cache-dir",
+                 dep],
+                check=True, capture_output=True,
+            )
+            print_success(f"  Installed {dep}")
+        except subprocess.CalledProcessError as e:
+            print_error(f"  Failed to install {dep}")
+            stderr = e.stderr.decode() if e.stderr else "Unknown error"
+            print_error(f"  {stderr[:300]}")
+            return False
+
+    print_success("All dependencies installed.")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Bootstrap shim generation
+# ---------------------------------------------------------------------------
+
+def generate_bootstrap_shim(original_shim_path: Path) -> str:
+    """Prepend the bootstrap preamble to the original plugin shim."""
+    original = original_shim_path.read_text(encoding="utf-8")
+    preamble = BOOTSTRAP_PREAMBLE.format(obf_key=OBFUSCATION_KEY)
+    return preamble + original
+
+
+# ---------------------------------------------------------------------------
+# Config file
+# ---------------------------------------------------------------------------
+
+def write_config(config_dir: Path, auth0_domain: str, auth0_client_id: str,
+                 auth0_audience: str, environment: str):
+    """Write obfuscated config.dat."""
+    config_dir.mkdir(parents=True, exist_ok=True)
+    config = {
+        "CLIPABIT_AUTH0_DOMAIN": auth0_domain,
+        "CLIPABIT_AUTH0_CLIENT_ID": auth0_client_id,
+        "CLIPABIT_AUTH0_AUDIENCE": auth0_audience,
+        "CLIPABIT_ENVIRONMENT": environment,
+    }
+    encoded = encode_config(config)
+    config_path = config_dir / "config.dat"
+    config_path.write_text(encoded, encoding="utf-8")
+    print_success(f"Config written to {config_path}")
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Install logic
+# ---------------------------------------------------------------------------
+
+def install_plugin(plugin_dir: Path, skip_checks: bool = False):
+    """Full installation from a local plugin directory."""
+
+    # --- Pre-flight ---
+    if not check_platform():
         return False
 
+    if not skip_checks:
+        if not check_davinci_resolve():
+            return False
+    else:
+        print_warning("Skipping DaVinci Resolve check (--skip-checks).")
+
+    if not check_python():
+        return False
+    if not check_pip():
+        return False
+
+    # --- Resolve directories ---
+    scripts_dir, modules_dir = get_resolve_directories()
+    print_info(f"Scripts dir: {scripts_dir}")
+    print_info(f"Modules dir: {modules_dir}")
+
+    # --- Generate bootstrap shim ---
+    original_shim = plugin_dir / "clipabit.py"
+    if not original_shim.exists():
+        print_error(f"Plugin shim not found: {original_shim}")
+        return False
+
+    print_info("Generating bootstrap shim...")
+    shim_content = generate_bootstrap_shim(original_shim)
+    shim_target = scripts_dir / "ClipABit.py"
+    scripts_dir.mkdir(parents=True, exist_ok=True)
+    shim_target.write_text(shim_content, encoding="utf-8")
+    os.chmod(shim_target, 0o755)
+    print_success(f"Bootstrap shim installed: {shim_target}")
+
+    # --- Copy plugin package to Modules/clipabit/ ---
+    pkg_source = plugin_dir / "clipabit"
+    pkg_target = modules_dir / "clipabit"
+    if not pkg_source.is_dir():
+        print_error(f"Plugin package not found: {pkg_source}")
+        return False
+
+    if pkg_target.exists():
+        print_warning("Removing existing clipabit package...")
+        shutil.rmtree(pkg_target)
+    modules_dir.mkdir(parents=True, exist_ok=True)
+    shutil.copytree(pkg_source, pkg_target)
+    print_success(f"Plugin package installed: {pkg_target}")
+
+    # --- Copy assets to Modules/assets/ ---
+    assets_source = plugin_dir / "assets"
+    assets_target = modules_dir / "assets"
+    if assets_source.is_dir():
+        if assets_target.exists():
+            shutil.rmtree(assets_target)
+        shutil.copytree(assets_source, assets_target)
+        print_success(f"Assets installed: {assets_target}")
+    else:
+        print_warning("No assets directory found in plugin.")
+
+    # --- Install dependencies to Modules/clipabit_deps/ ---
+    deps_target = modules_dir / "clipabit_deps"
+    if not install_dependencies(deps_target, plugin_dir):
+        return False
+
+    # --- Write config ---
+    auth0_domain = os.environ.get("CLIPABIT_AUTH0_DOMAIN", "")
+    auth0_client_id = os.environ.get("CLIPABIT_AUTH0_CLIENT_ID", "")
+    auth0_audience = os.environ.get("CLIPABIT_AUTH0_AUDIENCE", "")
+    environment = os.environ.get("CLIPABIT_ENVIRONMENT", "prod")
+
+    if auth0_domain and auth0_client_id and auth0_audience:
+        config_dir = get_config_directory()
+        write_config(config_dir, auth0_domain, auth0_client_id, auth0_audience, environment)
+    else:
+        print_warning("Auth0 env vars not set. Skipping config.dat generation.")
+        print_info("Set CLIPABIT_AUTH0_DOMAIN, CLIPABIT_AUTH0_CLIENT_ID, CLIPABIT_AUTH0_AUDIENCE to enable.")
+
+    return True
+
+
+# ---------------------------------------------------------------------------
+# Verification
+# ---------------------------------------------------------------------------
 
 def verify_installation():
-    """Verify that the installation was successful."""
+    """Verify the installation is complete and functional."""
     print_info("Verifying installation...")
-    
-    plugin_dir = get_resolve_plugin_directory()
-    plugin_path = plugin_dir / "ClipABit/clipabit.py"
-    
-    if not plugin_path.exists():
-        print_error("Plugin file not found after installation.")
-        return False
-    
-    print_success("Plugin file verified.")
-    
-    # Check if dependencies are importable
-    print_info("Checking dependencies...")
+    scripts_dir, modules_dir = get_resolve_directories()
+    ok = True
+
+    # Shim
+    shim = scripts_dir / "ClipABit.py"
+    if shim.exists():
+        print_success(f"Shim: {shim}")
+    else:
+        print_error(f"Shim missing: {shim}")
+        ok = False
+
+    # Package
+    pkg_init = modules_dir / "clipabit" / "__init__.py"
+    if pkg_init.exists():
+        print_success(f"Package: {modules_dir / 'clipabit'}")
+    else:
+        print_error(f"Package missing: {pkg_init}")
+        ok = False
+
+    # Deps
+    deps_dir = modules_dir / "clipabit_deps"
+    if deps_dir.is_dir() and any(deps_dir.iterdir()):
+        print_success(f"Dependencies: {deps_dir}")
+    else:
+        print_error(f"Dependencies missing: {deps_dir}")
+        ok = False
+
+    # Assets
+    assets_dir = modules_dir / "assets"
+    if assets_dir.is_dir():
+        print_success(f"Assets: {assets_dir}")
+    else:
+        print_warning(f"Assets missing: {assets_dir}")
+
+    # Config
+    config_path = get_config_directory() / "config.dat"
+    if config_path.exists():
+        try:
+            encoded = config_path.read_text(encoding="utf-8").strip()
+            cfg = decode_config(encoded)
+            if cfg.get("CLIPABIT_AUTH0_DOMAIN"):
+                print_success(f"Config: {config_path}")
+            else:
+                print_warning("Config exists but appears incomplete.")
+        except Exception:
+            print_warning("Config exists but could not be decoded.")
+    else:
+        print_warning(f"Config missing: {config_path}")
+
+    # Import test
+    print_info("Running import test...")
+    cmd = get_python_cmd()
+    test_script = (
+        f"import sys; sys.path.insert(0, r'{deps_dir}'); "
+        "import PyQt6, requests, keyring; print('OK')"
+    )
     try:
-        subprocess.run(
-            ["python3", "-c", "import PyQt6, requests, watchdog"],
-            check=True,
-            capture_output=True
+        result = subprocess.run(
+            [cmd, "-c", test_script],
+            capture_output=True, text=True, timeout=30,
         )
-        print_success("All dependencies are accessible.")
-        return True
-    except subprocess.CalledProcessError:
-        print_error("Some dependencies are not accessible.")
-        return False
+        if result.returncode == 0:
+            print_success("Import test passed.")
+        else:
+            print_warning(f"Import test failed: {result.stderr.strip()[:200]}")
+            ok = False
+    except Exception as e:
+        print_warning(f"Import test error: {e}")
+
+    return ok
 
 
-def print_Utilityletion_message():
-    """Print installation Utilityletion message."""
-    print_header("Installation Utilitylete!")
-    print_success("ClipABit plugin has been installed successfully.")
-    print()
-    print_info("To use the plugin in DaVinci Resolve:")
-    print("  1. Open DaVinci Resolve")
-    print("  2. Go to the Fusion page")
-    print("  3. Open the Script menu")
-    print("  4. Select 'Utility' → 'ClipABit' → 'clipabit'")
-    print()
-    print_info("For support, visit: https://github.com/yourusername/clipabit")
-    print()
-
+# ---------------------------------------------------------------------------
+# CLI
+# ---------------------------------------------------------------------------
 
 def main():
-    """Main installation function."""
+    parser = argparse.ArgumentParser(description="ClipABit Plugin Installer")
+    parser.add_argument("--download-only", action="store_true",
+                        help="Download the plugin to staging dir and exit.")
+    parser.add_argument("--local", type=str, default=None,
+                        help="Install from a local plugin directory instead of downloading.")
+    parser.add_argument("--skip-checks", action="store_true",
+                        help="Skip DaVinci Resolve check (useful for building on machines without Resolve).")
+    parser.add_argument("--tag", type=str, default=None,
+                        help="Specific release tag to download (e.g. v1.2.3).")
+    parser.add_argument("--staging-dir", type=str, default=None,
+                        help="Directory to stage the downloaded plugin into.")
+    args = parser.parse_args()
+
     print_header("ClipABit Plugin Installer")
-    
-    # Check if running on a supported platform
-    if not check_platform():
-        sys.exit(1)
-    
-    # Check DaVinci Resolve installation
-    if not check_davinci_resolve():
-        print_error("Installation aborted: DaVinci Resolve not found.")
-        sys.exit(1)
-    
-    # Check Python installation
-    if not check_python_installation():
-        print_error("Installation aborted: Python not found.")
-        sys.exit(1)
-    
-    # Check pip installation
-    if not check_pip_installation():
-        print_error("Installation aborted: pip not available.")
-        sys.exit(1)
-    
-    # Install dependencies
-    if not install_dependencies():
-        print_error("Installation aborted: Failed to install dependencies.")
-        sys.exit(1)
-    
-    # Copy plugin files
-    if not copy_plugin_files():
-        print_error("Installation aborted: Failed to copy plugin files.")
-        sys.exit(1)
-    
-    # Verify installation
-    if not verify_installation():
-        print_warning("Installation Utilityleted with warnings.")
+
+    # Determine staging directory
+    script_dir = Path(__file__).parent.absolute()
+    staging_dir = Path(args.staging_dir) if args.staging_dir else script_dir
+
+    if args.local:
+        # Install from local path
+        plugin_dir = Path(args.local)
+        if not plugin_dir.is_dir():
+            print_error(f"Local plugin directory not found: {plugin_dir}")
+            sys.exit(1)
+    else:
+        # Download if plugin/ doesn't exist yet
+        plugin_dir = staging_dir / "plugin"
+        if not plugin_dir.is_dir() or not (plugin_dir / "clipabit.py").exists():
+            if not download_plugin_release(staging_dir, tag=args.tag):
+                print_error("Failed to download plugin.")
+                sys.exit(1)
+
+    if args.download_only:
+        print_success("Download complete. Exiting (--download-only).")
         sys.exit(0)
-    
-    # Print Utilityletion message
-    print_Utilityletion_message()
+
+    # Run full install
+    if not install_plugin(plugin_dir, skip_checks=args.skip_checks):
+        print_error("Installation failed.")
+        sys.exit(1)
+
+    # Verify
+    if not verify_installation():
+        print_warning("Installation completed with warnings.")
+    else:
+        print_header("Installation Complete!")
+        print_success("ClipABit plugin has been installed successfully.")
+        print()
+        print_info("To use the plugin in DaVinci Resolve:")
+        print("  1. Open DaVinci Resolve")
+        print("  2. Go to Workspace > Scripts")
+        print("  3. Select 'ClipABit'")
+        print()
+
     sys.exit(0)
 
 
