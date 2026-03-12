@@ -5,3 +5,7 @@ dist/
 plugin/
 __pycache__/
 *.pyc
+.pytest_cache/
+
+docs/
+install_venv/
