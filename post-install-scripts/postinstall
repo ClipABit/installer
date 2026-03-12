@@ -83,7 +83,7 @@ sudo -u "$CURRENT_USER" mkdir -p "$CLIPABIT_DIR"
 # -------------------------------------------------------------------
 # Backup existing installation
 # -------------------------------------------------------------------
-echo "Backing up existing installation..."
+echo "Backing up existing ClipABit installation..."
 backup_item() {
     local item="$1"
     local bak="${item}.bak"
@@ -125,7 +125,7 @@ do_rollback() {
 # -------------------------------------------------------------------
 # Install bundled Python runtime
 # -------------------------------------------------------------------
-echo "Installing bundled Python runtime..."
+echo "Installing ClipABit Python runtime..."
 sudo -u "$CURRENT_USER" cp -R "${BUNDLED_PYTHON_SOURCE}" "$CLIPABIT_DIR/python"
 chown -R "$CURRENT_USER:staff" "$CLIPABIT_DIR/python"
 
@@ -160,7 +160,7 @@ fi
 # -------------------------------------------------------------------
 # Install Python dependencies -> ~/Library/Application Support/ClipABit/deps/
 # -------------------------------------------------------------------
-echo "Installing Python dependencies..."
+echo "Installing ClipABit dependencies..."
 DEPS_DIR="$CLIPABIT_DIR/deps"
 sudo -u "$CURRENT_USER" mkdir -p "$DEPS_DIR"
 
@@ -212,7 +212,7 @@ echo "  Dependencies installed: $DEPS_DIR"
 # -------------------------------------------------------------------
 # Copy plugin package -> Modules/clipabit/
 # -------------------------------------------------------------------
-echo "Installing plugin package..."
+echo "Installing ClipABit plugin files..."
 sudo -u "$CURRENT_USER" cp -R "${PLUGIN_SOURCE}/clipabit" "$MODULES_DIR/clipabit"
 chown -R "$CURRENT_USER:staff" "$MODULES_DIR/clipabit"
 
@@ -227,6 +227,8 @@ echo "  Package installed: $MODULES_DIR/clipabit"
 # -------------------------------------------------------------------
 # Write obfuscated config.dat
 # -------------------------------------------------------------------
+echo "Configuring ClipABit..."
+
 AUTH0_DOMAIN="__AUTH0_DOMAIN__"
 AUTH0_CLIENT_ID="__AUTH0_CLIENT_ID__"
 AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
@@ -238,8 +240,6 @@ if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0_DOMAIN__" ]; then
         do_rollback
         exit 1
     fi
-
-    echo "Writing config.dat..."
     # Pass Auth0 values via env to avoid injection (no quotes/backslashes in Python source)
     sudo -u "$CURRENT_USER" \
         CLIPABIT_AUTH0_DOMAIN="$AUTH0_DOMAIN" \
@@ -273,7 +273,7 @@ fi
 # Generate and install bootstrap shim (LAST — so partial installs
 # don't show a broken entry in Resolve's Scripts menu)
 # -------------------------------------------------------------------
-echo "Generating bootstrap shim..."
+echo "Finalizing ClipABit installation..."
 
 SHIM_TARGET="$SCRIPTS_UTILITY/ClipABit.py"
 
@@ -363,12 +363,22 @@ echo "Cleaning up staging directory..."
 rm -rf "$STAGING_DIR" 2>/dev/null || true
 
 echo ""
-echo "  ClipABit plugin installed successfully!"
-echo "  Shim:    $SHIM_TARGET"
-echo "  Package: $MODULES_DIR/clipabit"
-echo "  Python:  $CLIPABIT_DIR/python"
-echo "  Deps:    $DEPS_DIR"
-echo "  Config:  $CONFIG_DIR/config.dat"
+echo "=========================================="
+echo "  ClipABit Installation Complete!"
+echo "=========================================="
+echo ""
+echo "  ClipABit has been installed successfully."
+echo ""
+echo "  To access ClipABit in DaVinci Resolve:"
+echo "    1. Open DaVinci Resolve"
+echo "    2. Go to Workspace > Scripts > ClipABit"
+echo ""
+echo "  Installation Details:"
+echo "    Shim:    $SHIM_TARGET"
+echo "    Package: $MODULES_DIR/clipabit"
+echo "    Python:  $CLIPABIT_DIR/python"
+echo "    Deps:    $DEPS_DIR"
+echo "    Config:  $CONFIG_DIR/config.dat"
 echo ""
 
 exit 0

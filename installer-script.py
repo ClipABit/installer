@@ -630,6 +630,7 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
     """
 
     # --- Pre-flight ---
+    print_info("Verifying system compatibility...")
     if not check_platform():
         return False
 
@@ -670,20 +671,24 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
         return False
 
     # --- Backup existing installation ---
+    print_info("Backing up existing ClipABit installation...")
     backup_existing(scripts_dir, modules_dir, clipabit_dir, config_dir)
 
     try:
         # --- Install bundled Python runtime ---
         if bundled_python_dir is not None:
+            print_info("Installing ClipABit Python runtime...")
             python_target = clipabit_dir / "python"
             install_python_runtime(bundled_python_dir, python_target)
 
         # --- Install dependencies ---
+        print_info("Installing ClipABit dependencies...")
         deps_target = clipabit_dir / "deps"
         if not install_dependencies(deps_target, plugin_dir, python_exe=python_exe_path):
             raise RuntimeError("Dependency installation failed")
 
         # --- Copy plugin package to Modules/clipabit/ ---
+        print_info("Installing ClipABit plugin files...")
         pkg_target = modules_dir / "clipabit"
         if pkg_target.exists():
             shutil.rmtree(pkg_target)
@@ -692,6 +697,7 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
         print_success(f"Plugin package installed: {pkg_target}")
 
         # --- Write config ---
+        print_info("Configuring ClipABit...")
         auth0_domain = os.environ.get("CLIPABIT_AUTH0_DOMAIN", "")
         auth0_client_id = os.environ.get("CLIPABIT_AUTH0_CLIENT_ID", "")
         auth0_audience = os.environ.get("CLIPABIT_AUTH0_AUDIENCE", "")
@@ -711,7 +717,7 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
             print_warning("Auth0 env vars not set. Skipping config.dat generation.")
 
         # --- Generate bootstrap shim (LAST) ---
-        print_info("Generating bootstrap shim...")
+        print_info("Finalizing ClipABit installation...")
         shim_content = generate_bootstrap_shim(original_shim)
         try:
             compile(shim_content, "ClipABit.py", "exec")
@@ -866,13 +872,14 @@ def main():
     if not verify_installation(plugin_dir):
         print_warning("Installation completed with warnings.")
     else:
-        print_header("Installation Complete!")
-        print_success("ClipABit plugin has been installed successfully.")
+        print_header("ClipABit Installation Complete!")
+        print_success("ClipABit has been installed successfully.")
         print()
-        print_info("To use the plugin in DaVinci Resolve:")
+        print_info("To access ClipABit in DaVinci Resolve:")
         print("  1. Open DaVinci Resolve")
-        print("  2. Go to Workspace > Scripts")
-        print("  3. Select 'ClipABit'")
+        print("  2. Go to Workspace > Scripts > ClipABit")
+        print()
+        print_info("The ClipABit plugin will appear in the Scripts menu.")
         print()
 
     sys.exit(0)
