@@ -1,67 +1,268 @@
 #!/bin/bash
 #
-# ClipABit Plugin Installer - Postinstall Script
-# This script runs automatically when the .pkg is installed
+# ClipABit Plugin - macOS Postinstall Script
+# Runs automatically when the .pkg is installed.
+#
+# Auth0 values are templated at build time by build-pkg.sh:
+#   __AUTH0_DOMAIN__  __AUTH0_CLIENT_ID__  __AUTH0_AUDIENCE__  __ENVIRONMENT__
 #
 
 set -e
 
-# Get the current user (even when run with sudo)
+# -------------------------------------------------------------------
+# Detect the real user (even when running as root via installer)
+# -------------------------------------------------------------------
 CURRENT_USER="${USER:-$(whoami)}"
 if [ "$CURRENT_USER" = "root" ]; then
     CURRENT_USER=$(stat -f "%Su" /dev/console)
 fi
-
 USER_HOME=$(eval echo "~$CURRENT_USER")
 
 echo "Running ClipABit Plugin Installer..."
-echo "Installing for user: $CURRENT_USER"
-echo "User home: $USER_HOME"
+echo "  User: $CURRENT_USER"
+echo "  Home: $USER_HOME"
 
-# Target directory in user space
-TARGET_DIR="$USER_HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion/Scripts/Utility/ClipABit"
-
-# Get the staging directory where package files were copied
+# -------------------------------------------------------------------
+# Paths
+# -------------------------------------------------------------------
 STAGING_DIR="$2/ClipABit"
 
-echo "Staging directory: $STAGING_DIR"
-echo "Target directory: $TARGET_DIR"
+FUSION_BASE="$USER_HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion"
+SCRIPTS_UTILITY="$FUSION_BASE/Scripts/Utility"
+MODULES_DIR="$FUSION_BASE/Modules"
+CONFIG_DIR="$USER_HOME/Library/Application Support/ClipABit"
 
-# Create target directory structure
-echo "Creating plugin directory..."
-mkdir -p "$TARGET_DIR"
+PLUGIN_SOURCE="${STAGING_DIR}/plugin"
 
-# Copy plugin files from staging to user directory
-if [ -d "${STAGING_DIR}/plugin" ]; then
-    echo "Copying plugin files..."
-    cp -R "${STAGING_DIR}/plugin/"* "$TARGET_DIR/"
-    
-    # Set proper ownership
-    chown -R "$CURRENT_USER:staff" "$TARGET_DIR"
-    chmod -R 755 "$TARGET_DIR"
-    
-    echo "✓ Plugin files copied successfully"
-elif [ -d "${STAGING_DIR}/frontend/plugin" ]; then
-    echo "Copying plugin files..."
-    cp -R "${STAGING_DIR}/frontend/plugin/"* "$TARGET_DIR/"
-    
-    # Set proper ownership
-    chown -R "$CURRENT_USER:staff" "$TARGET_DIR"
-    chmod -R 755 "$TARGET_DIR"
-    
-    echo "✓ Plugin files copied successfully"
-else
-    echo "✗ Error: Plugin files not found at ${STAGING_DIR}/plugin or ${STAGING_DIR}/frontend/plugin"
+echo "  Staging: $STAGING_DIR"
+echo "  Fusion:  $FUSION_BASE"
+
+# -------------------------------------------------------------------
+# Validate staging
+# -------------------------------------------------------------------
+if [ ! -f "${PLUGIN_SOURCE}/clipabit.py" ]; then
+    echo "ERROR: Plugin shim not found at ${PLUGIN_SOURCE}/clipabit.py"
     exit 1
 fi
 
-# Run the Python installer script for dependency installation
-if [ -f "${STAGING_DIR}/installer-script.py" ]; then
-    echo "Installing Python dependencies..."
-    sudo -u "$CURRENT_USER" /usr/bin/python3 "${STAGING_DIR}/installer-script.py" || true
+if [ ! -f "${PLUGIN_SOURCE}/pyproject.toml" ]; then
+    echo "ERROR: pyproject.toml not found at ${PLUGIN_SOURCE}/pyproject.toml"
+    exit 1
 fi
 
-echo "✓ ClipABit plugin installed successfully to user directory"
-echo "  Location: $TARGET_DIR"
+if [ ! -d "${PLUGIN_SOURCE}/clipabit" ]; then
+    echo "ERROR: clipabit package not found at ${PLUGIN_SOURCE}/clipabit"
+    exit 1
+fi
+
+# -------------------------------------------------------------------
+# Create directories
+# -------------------------------------------------------------------
+echo "Creating directories..."
+sudo -u "$CURRENT_USER" mkdir -p "$SCRIPTS_UTILITY"
+sudo -u "$CURRENT_USER" mkdir -p "$MODULES_DIR"
+sudo -u "$CURRENT_USER" mkdir -p "$CONFIG_DIR"
+
+# -------------------------------------------------------------------
+# Generate and install bootstrap shim
+# -------------------------------------------------------------------
+echo "Generating bootstrap shim..."
+
+# Find python3 (3.12+ required for tomllib and project)
+PYTHON_CMD="/usr/bin/python3"
+if [ ! -x "$PYTHON_CMD" ]; then
+    PYTHON_CMD=$(which python3 2>/dev/null || true)
+fi
+if [ -z "$PYTHON_CMD" ]; then
+    echo "ERROR: python3 not found"
+    exit 1
+fi
+PYTHON_VERSION=$("$PYTHON_CMD" -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,12) else 1)" 2>/dev/null) || true
+if [ -z "$PYTHON_VERSION" ] || ! "$PYTHON_CMD" -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)" 2>/dev/null; then
+    echo "ERROR: Python 3.12 or newer is required (found: $("$PYTHON_CMD" --version 2>/dev/null || echo 'unknown')). Install from https://www.python.org/downloads/ or use pyenv."
+    exit 1
+fi
+echo "  Python: $PYTHON_VERSION"
+
+# Generate shim inline (bootstrap preamble + original clipabit.py)
+SHIM_TARGET="$SCRIPTS_UTILITY/ClipABit.py"
+
+sudo -u "$CURRENT_USER" \
+    _CLIPABIT_PLUGIN_SOURCE="$PLUGIN_SOURCE" \
+    _CLIPABIT_SHIM_TARGET="$SHIM_TARGET" \
+    "$PYTHON_CMD" -c "
+import sys, os
+obf_key = 'clipabit-resolve-plugin-2026'
+plugin_source = os.environ['_CLIPABIT_PLUGIN_SOURCE']
+shim_target = os.environ['_CLIPABIT_SHIM_TARGET']
+
+preamble = '''# === ClipABit Installer Bootstrap ===
+def _clipabit_bootstrap():
+    import base64, json, os, sys
+    _KEY = \"''' + obf_key + '''\"
+    def _xor(data, key):
+        kb = key.encode(\"utf-8\")
+        return bytes(b ^ kb[i % len(kb)] for i, b in enumerate(data))
+    config_locations = {
+        \"darwin\": os.path.expanduser(
+            \"~/Library/Application Support/ClipABit/config.dat\"),
+        \"win32\": os.path.join(
+            os.environ.get(\"APPDATA\", \"\"), \"ClipABit\", \"config.dat\"),
+    }
+    config_path = config_locations.get(
+        sys.platform,
+        os.path.expanduser(\"~/.config/clipabit/config.dat\"),
+    )
+    if os.path.exists(config_path):
+        try:
+            raw = open(config_path, \"r\").read().strip()
+            cfg = json.loads(_xor(base64.b64decode(raw), _KEY).decode(\"utf-8\"))
+            for k, v in cfg.items():
+                os.environ.setdefault(k, str(v))
+        except Exception:
+            pass
+    try:
+        _sd = os.path.dirname(os.path.abspath(__file__))
+    except NameError:
+        _sd = os.getcwd()
+    _deps = os.path.abspath(os.path.join(_sd, \"..\", \"..\", \"Modules\", \"clipabit_deps\"))
+    if os.path.isdir(_deps) and _deps not in sys.path:
+        sys.path.insert(0, _deps)
+_clipabit_bootstrap()
+del _clipabit_bootstrap
+# === End Installer Bootstrap ===
+
+'''
+
+original = open(os.path.join(plugin_source, 'clipabit.py'), 'r').read()
+shim = preamble + original
+
+# Validate syntax before writing
+compile(shim, 'ClipABit.py', 'exec')
+
+with open(shim_target, 'w') as f:
+    f.write(shim)
+"
+
+chmod 755 "$SHIM_TARGET"
+chown "$CURRENT_USER:staff" "$SHIM_TARGET"
+echo "  Shim installed: $SHIM_TARGET"
+
+# -------------------------------------------------------------------
+# Copy plugin package -> Modules/clipabit/
+# -------------------------------------------------------------------
+echo "Installing plugin package..."
+rm -rf "$MODULES_DIR/clipabit"
+sudo -u "$CURRENT_USER" cp -R "${PLUGIN_SOURCE}/clipabit" "$MODULES_DIR/clipabit"
+chown -R "$CURRENT_USER:staff" "$MODULES_DIR/clipabit"
+echo "  Package installed: $MODULES_DIR/clipabit"
+
+# -------------------------------------------------------------------
+# Install Python dependencies -> Modules/clipabit_deps/
+# -------------------------------------------------------------------
+echo "Installing Python dependencies..."
+DEPS_DIR="$MODULES_DIR/clipabit_deps"
+sudo -u "$CURRENT_USER" rm -rf "$DEPS_DIR"
+sudo -u "$CURRENT_USER" mkdir -p "$DEPS_DIR"
+
+# Read deps from pyproject.toml (one per line so PEP 508 markers are preserved)
+DEPS_FILE=$(mktemp)
+trap 'rm -f "$DEPS_FILE"' EXIT
+if ! sudo -u "$CURRENT_USER" \
+    _CLIPABIT_PLUGIN_SOURCE="$PLUGIN_SOURCE" \
+    "$PYTHON_CMD" -c "
+import os, tomllib
+plugin_source = os.environ['_CLIPABIT_PLUGIN_SOURCE']
+with open(os.path.join(plugin_source, 'pyproject.toml'), 'rb') as f:
+    data = tomllib.load(f)
+deps = data.get('project', {}).get('dependencies', [])
+if not deps:
+    raise SystemExit('No dependencies listed in pyproject.toml')
+for d in deps:
+    print(d)
+" > "$DEPS_FILE"; then
+    echo "ERROR: Failed to read dependencies from pyproject.toml"
+    exit 1
+fi
+
+FAILED_DEPS=""
+while IFS= read -r dep || [ -n "$dep" ]; do
+    [ -z "$dep" ] && continue
+    echo "  Installing $dep..."
+    if ! sudo -u "$CURRENT_USER" "$PYTHON_CMD" -m pip install \
+        --target "$DEPS_DIR" \
+        --no-user \
+        --no-cache-dir \
+        "$dep" 2>&1; then
+        echo "  ERROR: Failed to install $dep"
+        FAILED_DEPS="$FAILED_DEPS $dep"
+    fi
+done < "$DEPS_FILE"
+
+if [ -n "$FAILED_DEPS" ]; then
+    echo "ERROR: Failed to install dependencies:$FAILED_DEPS"
+    exit 1
+fi
+
+chown -R "$CURRENT_USER:staff" "$DEPS_DIR"
+echo "  Dependencies installed: $DEPS_DIR"
+
+# -------------------------------------------------------------------
+# Write obfuscated config.dat
+# -------------------------------------------------------------------
+AUTH0_DOMAIN="__AUTH0_DOMAIN__"
+AUTH0_CLIENT_ID="__AUTH0_CLIENT_ID__"
+AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
+ENVIRONMENT="__ENVIRONMENT__"
+
+if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0_DOMAIN__" ]; then
+    if [ "$AUTH0_CLIENT_ID" = "__AUTH0_CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0_AUDIENCE__" ]; then
+        echo "ERROR: Auth0 config partially templated. Domain set but client_id or audience missing."
+        exit 1
+    fi
+
+    echo "Writing config.dat..."
+    # Pass Auth0 values via env to avoid injection (no quotes/backslashes in Python source)
+    sudo -u "$CURRENT_USER" \
+        CLIPABIT_AUTH0_DOMAIN="$AUTH0_DOMAIN" \
+        CLIPABIT_AUTH0_CLIENT_ID="$AUTH0_CLIENT_ID" \
+        CLIPABIT_AUTH0_AUDIENCE="$AUTH0_AUDIENCE" \
+        CLIPABIT_ENVIRONMENT="$ENVIRONMENT" \
+        "$PYTHON_CMD" -c "
+import json, base64, os
+key = 'clipabit-resolve-plugin-2026'
+config = {
+    'CLIPABIT_AUTH0_DOMAIN': os.environ.get('CLIPABIT_AUTH0_DOMAIN', ''),
+    'CLIPABIT_AUTH0_CLIENT_ID': os.environ.get('CLIPABIT_AUTH0_CLIENT_ID', ''),
+    'CLIPABIT_AUTH0_AUDIENCE': os.environ.get('CLIPABIT_AUTH0_AUDIENCE', ''),
+    'CLIPABIT_ENVIRONMENT': os.environ.get('CLIPABIT_ENVIRONMENT', 'prod'),
+}
+raw = json.dumps(config).encode('utf-8')
+kb = key.encode('utf-8')
+xored = bytes(b ^ kb[i % len(kb)] for i, b in enumerate(raw))
+encoded = base64.b64encode(xored).decode('ascii')
+config_path = os.path.expanduser('~/Library/Application Support/ClipABit/config.dat')
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, 'w') as f:
+    f.write(encoded)
+print('  Config written: ' + config_path)
+"
+else
+    echo "  Auth0 values not baked in. Skipping config.dat."
+fi
+
+# -------------------------------------------------------------------
+# Cleanup staging
+# -------------------------------------------------------------------
+echo "Cleaning up staging directory..."
+rm -rf "$STAGING_DIR" 2>/dev/null || true
+
+echo ""
+echo "  ClipABit plugin installed successfully!"
+echo "  Shim:    $SHIM_TARGET"
+echo "  Package: $MODULES_DIR/clipabit"
+echo "  Deps:    $DEPS_DIR"
+echo "  Config:  $CONFIG_DIR/config.dat"
+echo ""
 
 exit 0
