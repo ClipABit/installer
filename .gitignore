@@ -9,3 +9,6 @@ __pycache__/
 
 docs/
 install_venv/
+
+.env
+.env.local
