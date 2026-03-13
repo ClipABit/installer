@@ -256,6 +256,11 @@ pkgbuild \
 # Expand and inspect the .pkg before shipping to catch missing files or
 # accidentally-included bloat (tests, docs, .git). This is a sanity check
 # that runs before the package reaches end users.
+#
+# NOTE: This is different from postinstall validation:
+#   - Build-time (here): QA on developer machine, catches build script bugs
+#   - Install-time (postinstall): corruption detection on end user machine
+# Both are needed - fail fast at build time, fail safe at install time.
 if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     echo ""
     echo "  Verifying .pkg contents..."
