@@ -201,7 +201,11 @@ def get_clipabit_directory(override=None) -> Path:
     if system == "Darwin":
         return Path.home() / "Library/Application Support/ClipABit"
     elif system == "Windows":
-        return Path(os.getenv("LOCALAPPDATA", "")) / "ClipABit"
+        # Fall back to known absolute path if LOCALAPPDATA is unset
+        localappdata = os.getenv("LOCALAPPDATA")
+        if not localappdata:
+            localappdata = str(Path.home() / "AppData" / "Local")
+        return Path(localappdata) / "ClipABit"
     return Path.home() / ".local" / "share" / "clipabit"
 
 
@@ -292,13 +296,14 @@ def check_python():
     print_success(f"Found: {exe}")
 
     try:
+        # Require Python 3.11+ (aligned with bundled Python version)
         result = subprocess.run(
-            [exe, "-c", "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,12) else 1)"],
+            [exe, "-c", "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,11) else 1)"],
             capture_output=True, text=True,
         )
         version = result.stdout.strip()
         if result.returncode != 0:
-            print_error(f"Python {version} found but 3.12+ is required.")
+            print_error(f"Python {version} found but 3.11+ is required.")
             return None
         print_success(f"Python {version}")
         return exe
@@ -477,6 +482,20 @@ def install_python_runtime(source: Path, target: Path):
             )
         except FileNotFoundError:
             pass
+
+    # Validate the Python binary exists and is executable
+    if platform.system() == "Windows":
+        python_exe = target / "python.exe"
+    else:
+        python_exe = target / "bin" / "python3"
+
+    if not python_exe.exists():
+        print_error(f"Python binary not found after copy: {python_exe}")
+        return False
+
+    if not os.access(python_exe, os.X_OK):
+        print_error(f"Python binary is not executable: {python_exe}")
+        return False
 
     print_success(f"Bundled Python installed: {target}")
     return True
@@ -659,7 +678,11 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
 
     # Determine Python exe (bundled takes priority)
     if bundled_python_dir is not None:
-        python_exe_path = str(bundled_python_dir / "bin" / "python3")
+        # Windows bundled Python is at python.exe, macOS at bin/python3
+        if platform.system() == "Windows":
+            python_exe_path = str(bundled_python_dir / "python.exe")
+        else:
+            python_exe_path = str(bundled_python_dir / "bin" / "python3")
     else:
         python_exe_path = check_python()
         if not python_exe_path:
@@ -687,6 +710,12 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
             print_info("Installing ClipABit Python runtime...")
             python_target = clipabit_dir / "python"
             install_python_runtime(bundled_python_dir, python_target)
+
+            # Update python_exe_path to point to the installed runtime (after quarantine removal)
+            if platform.system() == "Windows":
+                python_exe_path = str(python_target / "python.exe")
+            else:
+                python_exe_path = str(python_target / "bin" / "python3")
 
         # --- Install dependencies ---
         print_info("Installing ClipABit dependencies...")
