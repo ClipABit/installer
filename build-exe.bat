@@ -1,4 +1,5 @@
 @echo off
+setlocal EnableDelayedExpansion
 REM Build ClipABit Windows Installer using PyInstaller
 REM
 REM Optional env vars:
@@ -61,11 +62,11 @@ echo.
 echo [3/7] Downloading bundled Python %PYTHON_VERSION%...
 if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
     set PYTHON_ARCHIVE=cpython-%PYTHON_VERSION%+%PYTHON_BUILD_TAG%-x86_64-pc-windows-msvc-install_only.tar.gz
-    set PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/%PYTHON_BUILD_TAG%/%PYTHON_ARCHIVE%
+    set PYTHON_URL=https://github.com/astral-sh/python-build-standalone/releases/download/%PYTHON_BUILD_TAG%/!PYTHON_ARCHIVE!
 
     if not exist "%PYTHON_CACHE_DIR%" mkdir "%PYTHON_CACHE_DIR%"
-    echo      Downloading %PYTHON_URL%...
-    curl -fSL -o "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" "%PYTHON_URL%"
+    echo      Downloading !PYTHON_URL!...
+    curl -fSL -o "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" "!PYTHON_URL!"
     if errorlevel 1 (
         echo [ERROR] Failed to download Python %PYTHON_VERSION%
         pause
@@ -74,26 +75,26 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
 
     REM Verify checksum to ensure download integrity (corrupted/MITM detection)
     echo      Verifying checksum...
-    for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" SHA256 ^| findstr /v "CertUtil"') do (
+    for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" SHA256 ^| findstr /v "CertUtil"') do (
         set "ACTUAL_SHA256=%%H"
         goto :check_hash
     )
     :check_hash
     REM Remove any spaces from certutil output
-    set "ACTUAL_SHA256=%ACTUAL_SHA256: =%"
-    if /i not "%ACTUAL_SHA256%"=="%PYTHON_SHA256%" (
+    set "ACTUAL_SHA256=!ACTUAL_SHA256: =!"
+    if /i not "!ACTUAL_SHA256!"=="%PYTHON_SHA256%" (
         echo [ERROR] SHA256 mismatch!
         echo   Expected: %PYTHON_SHA256%
-        echo   Actual:   %ACTUAL_SHA256%
-        del "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" >nul 2>&1
+        echo   Actual:   !ACTUAL_SHA256!
+        del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" >nul 2>&1
         pause
         exit /b 1
     )
     echo      Checksum verified
 
     echo      Extracting...
-    tar xzf "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" -C "%PYTHON_CACHE_DIR%"
-    del "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" >nul 2>&1
+    tar xzf "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" -C "%PYTHON_CACHE_DIR%"
+    del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" >nul 2>&1
 ) else (
     echo      Using cached Python from %PYTHON_CACHE_DIR%\python
 )

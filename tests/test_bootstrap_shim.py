@@ -49,14 +49,18 @@ def test_shim_config_loading(fake_plugin_dir, tmp_path):
     original = (fake_plugin_dir / "clipabit.py").read_text()
     preamble = shim[: shim.index(original)]
 
-    # Patch config_locations to use our temp path
+    # Patch config_locations to use our temp path (macOS form)
     patched = preamble.replace(
         'os.path.expanduser(\n            "~/Library/Application Support/ClipABit/config.dat")',
         f'r"{config_dat}"',
     )
-    # Also try the simpler single-line form
     patched = patched.replace(
         'os.path.expanduser("~/Library/Application Support/ClipABit/config.dat")',
+        f'r"{config_dat}"',
+    )
+    # Patch the fallback path too (used on Linux CI where sys.platform is 'linux')
+    patched = patched.replace(
+        'os.path.expanduser("~/.config/clipabit/config.dat")',
         f'r"{config_dat}"',
     )
 
