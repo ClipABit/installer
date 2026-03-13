@@ -139,11 +139,26 @@ echo [5/7] Validating binary wheel availability...
 REM IMPORTANT: The bundled Python has NO C compiler. We must verify that all
 REM dependencies have pre-built binary wheels (no source-only packages).
 REM If this check passes at build time, we guarantee install-time won't fail.
-"%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r requirements_from_toml.txt >nul 2>&1
+
+REM Extract dependencies from pyproject.toml to a temporary requirements file
+set TEMP_REQS=%TEMP%\clipabit-reqs-%RANDOM%.txt
+"%PYTHON_CACHE_DIR%\python\python.exe" -c "import tomllib; data = tomllib.load(open('plugin/pyproject.toml', 'rb')); [print(d) for d in data['project']['dependencies']]" > "%TEMP_REQS%"
 if errorlevel 1 (
-    echo [WARNING] Wheel validation skipped or failed. Verify manually.
+    echo [ERROR] Failed to extract dependencies from pyproject.toml
+    pause
+    exit /b 1
 )
-echo      Wheel validation complete
+
+"%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r "%TEMP_REQS%" >nul 2>&1
+if errorlevel 1 (
+    echo [ERROR] Not all dependencies have binary wheels available.
+    echo The bundled Python has no C compiler - sdist-only packages will fail at install time.
+    del "%TEMP_REQS%" >nul 2>&1
+    pause
+    exit /b 1
+)
+del "%TEMP_REQS%" >nul 2>&1
+echo      All dependencies have binary wheels
 
 echo.
 echo [6/7] Building Windows executable...
