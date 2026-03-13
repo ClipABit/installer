@@ -12,11 +12,37 @@ set -e
 # -------------------------------------------------------------------
 # Detect the real user (even when running as root via installer)
 # -------------------------------------------------------------------
+# The macOS installer runs this script as root, but we need to install files
+# in the actual user's home directory (~/Library/...). We detect the real
+# user via /dev/console ownership to find the correct home directory.
 CURRENT_USER="${USER:-$(whoami)}"
 if [ "$CURRENT_USER" = "root" ]; then
     CURRENT_USER=$(stat -f "%Su" /dev/console)
 fi
 USER_HOME=$(eval echo "~$CURRENT_USER")
+
+# -------------------------------------------------------------------
+# Logging — tee all output to a timestamped log file
+# -------------------------------------------------------------------
+# We provide two levels of output:
+#   - User-facing: clean output shown in the installer UI
+#   - Debug log: full detail including shell tracing (set -x) for troubleshooting
+# BASH_XTRACEFD=3 sends trace output to the log file only, not stdout.
+LOG_DIR="$USER_HOME/Library/Logs/ClipABit"
+sudo -u "$CURRENT_USER" mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/install-$(date '+%Y%m%d-%H%M%S').log"
+
+# Send stdout+stderr to both terminal and log file.
+# Also enable shell tracing (set -x) but route trace output to the log
+# file only, so the user sees clean output while the log has full detail.
+exec 3>"$LOG_FILE"
+BASH_XTRACEFD=3
+set -x
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "ClipABit Install Log: $(date)"
+echo "Log file: $LOG_FILE"
+echo ""
 
 echo "Running ClipABit Plugin Installer..."
 echo "  User: $CURRENT_USER"
@@ -43,6 +69,10 @@ echo "  ClipABit:   $CLIPABIT_DIR"
 # -------------------------------------------------------------------
 # Check if DaVinci Resolve is running
 # -------------------------------------------------------------------
+# Installing while Resolve is running can cause issues:
+#   - Resolve may have the old plugin loaded in memory
+#   - File locks may prevent overwriting plugin files
+# Require Resolve to be closed before proceeding.
 if pgrep -x "DaVinci Resolve" >/dev/null 2>&1; then
     echo ""
     echo "ERROR: DaVinci Resolve is currently running."
@@ -83,6 +113,9 @@ sudo -u "$CURRENT_USER" mkdir -p "$CLIPABIT_DIR"
 # -------------------------------------------------------------------
 # Backup existing installation
 # -------------------------------------------------------------------
+# Atomic install pattern: backup → install → cleanup_backups (or rollback on failure)
+# This ensures we can always restore the previous working installation if
+# anything goes wrong during the install process.
 echo "Backing up existing ClipABit installation..."
 backup_item() {
     local item="$1"
@@ -129,10 +162,15 @@ echo "Installing ClipABit Python runtime..."
 sudo -u "$CURRENT_USER" cp -R "${BUNDLED_PYTHON_SOURCE}" "$CLIPABIT_DIR/python"
 chown -R "$CURRENT_USER:staff" "$CLIPABIT_DIR/python"
 
-# Remove quarantine xattr (bundled Python is unsigned)
+# Remove quarantine xattr - macOS sets this on downloaded/extracted files.
+# The bundled Python is unsigned, so Gatekeeper would block it without this.
 xattr -dr com.apple.quarantine "$CLIPABIT_DIR/python" 2>/dev/null || true
 
-# Validate
+# Validate Python after install (INSTALL-TIME check on end user's machine)
+# This is different from the build-time check in build-pkg.sh:
+#   - Build-time: validates downloaded Python works on developer machine
+#   - Install-time: validates Python after copying, permission changes, and
+#     quarantine removal on the end user's machine. Triggers rollback on failure.
 PYTHON_CMD="$CLIPABIT_DIR/python/bin/python3"
 if [ ! -x "$PYTHON_CMD" ]; then
     echo "ERROR: Bundled Python not found after copy"
@@ -147,7 +185,9 @@ if [[ ! "${PYTHON_REPORTED}" == 3.11.* ]]; then
 fi
 echo "  Python: $PYTHON_REPORTED"
 
-# Validate pip
+# Validate pip is available after Python installation
+# Some Python builds may not include pip by default, so we use ensurepip
+# as a fallback to bootstrap it if needed.
 if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
     echo "  pip not found, trying ensurepip..."
     "$PYTHON_CMD" -m ensurepip --default-pip || {
@@ -165,6 +205,9 @@ DEPS_DIR="$CLIPABIT_DIR/deps"
 sudo -u "$CURRENT_USER" mkdir -p "$DEPS_DIR"
 
 # Read deps from pyproject.toml (one per line so PEP 508 markers are preserved)
+# We use a Python subprocess to parse TOML and pass values via env vars to
+# prevent shell injection. Dependencies with complex markers like
+# 'foo; python_version >= "3.11"' are preserved as single lines.
 DEPS_FILE=$(mktemp)
 trap 'rm -f "$DEPS_FILE"' EXIT
 if ! sudo -u "$CURRENT_USER" \
@@ -189,6 +232,9 @@ FAILED_DEPS=""
 while IFS= read -r dep || [ -n "$dep" ]; do
     [ -z "$dep" ] && continue
     echo "  Installing $dep..."
+    # --only-binary=:all: ensures we only install prebuilt wheels (no C compilation)
+    # --no-user prevents installing to ~/.local (we want isolation in deps/)
+    # --no-cache-dir saves disk space and ensures fresh downloads
     if ! sudo -u "$CURRENT_USER" "$PYTHON_CMD" -m pip install \
         --target "$DEPS_DIR" \
         --only-binary=:all: \
@@ -235,6 +281,9 @@ AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
 ENVIRONMENT="__ENVIRONMENT__"
 
 if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0_DOMAIN__" ]; then
+    # Detect partial Auth0 config (some values set, some placeholders remaining).
+    # Partial config indicates a build-time error and will cause confusing
+    # runtime failures, so we fail loudly here instead.
     if [ "$AUTH0_CLIENT_ID" = "__AUTH0_CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0_AUDIENCE__" ]; then
         echo "ERROR: Auth0 config partially templated. Domain set but client_id or audience missing."
         do_rollback
@@ -273,6 +322,10 @@ fi
 # Generate and install bootstrap shim (LAST — so partial installs
 # don't show a broken entry in Resolve's Scripts menu)
 # -------------------------------------------------------------------
+# CRITICAL: We write the shim LAST in the install process. This ensures that
+# if any earlier step fails (Python, deps, plugin files), Resolve won't show
+# a broken "ClipABit" menu entry. The shim is the user-facing entry point,
+# so it should only exist when the full installation is complete.
 echo "Finalizing ClipABit installation..."
 
 SHIM_TARGET="$SCRIPTS_UTILITY/ClipABit.py"
@@ -329,7 +382,9 @@ del _clipabit_bootstrap
 original = open(os.path.join(plugin_source, 'clipabit.py'), 'r').read()
 shim = preamble + original
 
-# Validate syntax before writing
+# Validate syntax before writing to catch any template/merge errors.
+# We don't want to write a broken Python file that would crash when Resolve
+# tries to load it from the Scripts menu.
 compile(shim, 'ClipABit.py', 'exec')
 
 with open(shim_target, 'w') as f:
@@ -349,6 +404,9 @@ echo "  Shim installed: $SHIM_TARGET"
 # -------------------------------------------------------------------
 # Cleanup backups (success)
 # -------------------------------------------------------------------
+# Install succeeded! Remove all .bak files. If we reached this point, the
+# new installation is complete and verified, so the old backups are no longer
+# needed. This completes the atomic install pattern: backup → install → cleanup.
 echo "Cleaning up backups..."
 rm -f "$SCRIPTS_UTILITY/ClipABit.py.bak"
 rm -rf "$MODULES_DIR/clipabit.bak"
@@ -379,6 +437,16 @@ echo "    Package: $MODULES_DIR/clipabit"
 echo "    Python:  $CLIPABIT_DIR/python"
 echo "    Deps:    $DEPS_DIR"
 echo "    Config:  $CONFIG_DIR/config.dat"
+echo "    Log:     $LOG_FILE"
 echo ""
+
+# Log installed file listing for post-mortem debugging
+echo "--- Installed files snapshot ---" >&3
+ls -la "$CLIPABIT_DIR/" >&3 2>&1 || true
+ls -la "$CLIPABIT_DIR/python/bin/" >&3 2>&1 || true
+ls -la "$CLIPABIT_DIR/deps/" >&3 2>&1 || true
+ls -la "$MODULES_DIR/clipabit/" >&3 2>&1 || true
+ls -la "$SHIM_TARGET" >&3 2>&1 || true
+echo "--- End installed files snapshot ---" >&3
 
 exit 0

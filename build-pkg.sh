@@ -55,6 +55,8 @@ fi
 # -------------------------------------------------------------------
 # Clean previous builds (preserve python cache)
 # -------------------------------------------------------------------
+# NOTE: We preserve PYTHON_CACHE_DIR to avoid re-downloading ~100MB Python
+# on every build. Only payload/ and dist/ are cleaned.
 echo "Cleaning previous builds..."
 rm -rf "${PAYLOAD_DIR}"
 rm -rf "${OUTPUT_DIR}"
@@ -93,7 +95,7 @@ else
     DOWNLOAD_PATH="${PYTHON_CACHE_DIR}/${PYTHON_ARCHIVE}"
     curl -fSL -o "${DOWNLOAD_PATH}" "${PYTHON_URL}"
 
-    # Verify checksum
+    # Verify checksum to ensure download integrity (corrupted/MITM detection)
     echo "  Verifying checksum..."
     ACTUAL_SHA256=$(shasum -a 256 "${DOWNLOAD_PATH}" | awk '{print $1}')
     if [ "${ACTUAL_SHA256}" != "${PYTHON_SHA256}" ]; then
@@ -112,7 +114,9 @@ else
     rm -f "${DOWNLOAD_PATH}"
 fi
 
-# Validate extracted Python
+# Validate extracted Python (BUILD-TIME smoke test on developer machine)
+# This catches corrupted downloads before packaging. Install-time validation
+# happens separately on the end user's machine (see postinstall script).
 BUNDLED_PYTHON="${PYTHON_CACHE_DIR}/python/bin/python3"
 PYTHON_REPORTED=$("${BUNDLED_PYTHON}" --version 2>&1 | awk '{print $2}')
 if [[ ! "${PYTHON_REPORTED}" == 3.11.* ]]; then
@@ -158,6 +162,10 @@ echo "Plugin validated."
 # -------------------------------------------------------------------
 # Build-time wheel validation
 # -------------------------------------------------------------------
+# IMPORTANT: The bundled Python has NO C compiler. We must verify that all
+# dependencies have pre-built binary wheels (no source-only packages).
+# If this check passes at build time, we guarantee install-time won't fail
+# trying to compile C extensions.
 echo "Validating all dependencies have binary wheels..."
 WHEEL_CHECK_DIR=$(mktemp -d)
 trap "rm -rf '${WHEEL_CHECK_DIR}'" EXIT
@@ -190,7 +198,8 @@ cp "${SCRIPT_DIR}/installer-script.py" "${PAYLOAD_DIR}/ClipABit/"
 cp -R "${PLUGIN_DIR}" "${PAYLOAD_DIR}/ClipABit/plugin"
 cp -R "${PYTHON_CACHE_DIR}/python" "${PAYLOAD_DIR}/ClipABit/python"
 
-# Exclude tests, docs, __pycache__, .git from payload
+# Exclude tests, docs, __pycache__, .git from payload to reduce installer size
+# and avoid shipping unnecessary files to end users.
 rm -rf "${PAYLOAD_DIR}/ClipABit/plugin/__pycache__"
 find "${PAYLOAD_DIR}" -name "__pycache__" -type d -exec rm -rf {} + 2>/dev/null || true
 find "${PAYLOAD_DIR}" -name ".git" -type d -exec rm -rf {} + 2>/dev/null || true
@@ -203,7 +212,9 @@ find "${PAYLOAD_DIR}/ClipABit/python" -path "*/site-packages/*/tests" -type d -e
 echo "Preparing postinstall script..."
 cp "${SCRIPTS_DIR}/postinstall" "${SCRIPTS_DIR}/postinstall.bak"
 
-# Always restore postinstall from backup on exit (prevents leaking Auth0 values if pkgbuild fails)
+# Always restore postinstall from backup on exit to prevent leaking Auth0
+# credentials. If pkgbuild fails mid-build, the templated postinstall file
+# would remain in the repo with secrets embedded. This trap ensures cleanup.
 restore_postinstall() {
     if [ -f "${SCRIPTS_DIR}/postinstall.bak" ]; then
         mv "${SCRIPTS_DIR}/postinstall.bak" "${SCRIPTS_DIR}/postinstall"
@@ -242,6 +253,9 @@ pkgbuild \
 # -------------------------------------------------------------------
 # Post-build verification
 # -------------------------------------------------------------------
+# Expand and inspect the .pkg before shipping to catch missing files or
+# accidentally-included bloat (tests, docs, .git). This is a sanity check
+# that runs before the package reaches end users.
 if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     echo ""
     echo "  Verifying .pkg contents..."

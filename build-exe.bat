@@ -21,6 +21,8 @@ set PYTHON_SHA256=3258b902130179f72a3086ad87deccfa2f111faff54de444535d7b72d99f2b
 set PYTHON_CACHE_DIR=build\python
 
 REM Check if Python is installed (for build tooling — not the bundled runtime)
+REM NOTE: This is the HOST Python used to run PyInstaller, not the bundled
+REM Python 3.11 that gets packaged into the .exe for end users.
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH
@@ -44,7 +46,9 @@ if errorlevel 1 (
 echo.
 echo [2/7] Installing build dependencies...
 python -m pip install --upgrade pip >nul 2>&1
-REM Pin PyInstaller to a vetted version to reduce supply-chain risk; update explicitly when needed
+REM Pin PyInstaller to a vetted version to reduce supply-chain risk.
+REM Using ==6.16.0 prevents auto-upgrading to potentially compromised versions.
+REM Update this pin explicitly after reviewing new PyInstaller releases.
 python -m pip install pyinstaller==6.16.0 >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Failed to install build dependencies
@@ -68,7 +72,7 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
         exit /b 1
     )
 
-    REM Verify checksum
+    REM Verify checksum to ensure download integrity (corrupted/MITM detection)
     echo      Verifying checksum...
     for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%PYTHON_CACHE_DIR%\%PYTHON_ARCHIVE%" SHA256 ^| findstr /v "CertUtil"') do (
         set "ACTUAL_SHA256=%%H"
@@ -94,7 +98,9 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
     echo      Using cached Python from %PYTHON_CACHE_DIR%\python
 )
 
-REM Validate bundled Python
+REM Validate bundled Python (BUILD-TIME smoke test on developer machine)
+REM This catches corrupted downloads before packaging. A separate install-time
+REM validation happens on the end user's machine (see installer-script.py).
 "%PYTHON_CACHE_DIR%\python\python.exe" --version
 if errorlevel 1 (
     echo [ERROR] Bundled Python validation failed
@@ -115,7 +121,8 @@ if not exist "plugin\clipabit.py" (
 ) else (
     echo      Plugin already present, skipping download
 )
-REM Validate full plugin structure regardless of download
+REM Validate full plugin structure regardless of download. Even if plugin/
+REM exists from a previous build, ensure it's complete before proceeding.
 if not exist "plugin\pyproject.toml" (
     echo [ERROR] plugin\pyproject.toml missing. Required for dependency resolution.
     pause
@@ -129,6 +136,9 @@ if not exist "plugin\clipabit" (
 
 echo.
 echo [5/7] Validating binary wheel availability...
+REM IMPORTANT: The bundled Python has NO C compiler. We must verify that all
+REM dependencies have pre-built binary wheels (no source-only packages).
+REM If this check passes at build time, we guarantee install-time won't fail.
 "%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r requirements_from_toml.txt >nul 2>&1
 if errorlevel 1 (
     echo [WARNING] Wheel validation skipped or failed. Verify manually.

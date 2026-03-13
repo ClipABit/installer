@@ -378,7 +378,9 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         with zipfile.ZipFile(zip_path, "r") as zf:
             tmp_path = Path(tmp)
             for info in zf.infolist():
-                # Guard against zip-slip: ensure no path traversal
+                # Guard against zip-slip vulnerability: malicious archives can contain
+                # paths like "../../../etc/passwd" to write outside the extraction dir.
+                # We validate each entry before extracting to prevent path traversal.
                 name = info.filename
                 if ".." in name or name.startswith("/") or (name.startswith("\\") and ".." in name):
                     print_error(f"Rejecting unsafe archive member: {name}")
@@ -464,7 +466,9 @@ def install_python_runtime(source: Path, target: Path):
         shutil.rmtree(target)
     shutil.copytree(source, target, symlinks=True)
 
-    # Remove macOS quarantine xattr
+    # Remove macOS quarantine xattr - macOS sets this on downloaded/extracted files.
+    # The bundled Python is unsigned, so Gatekeeper would block execution without
+    # removing this attribute. Similar to postinstall script behavior.
     if platform.system() == "Darwin":
         try:
             subprocess.run(
@@ -492,6 +496,9 @@ def install_dependencies(target_dir: Path, plugin_dir: Path, python_exe=None):
     for dep in deps:
         print_info(f"  Installing {dep}...")
         try:
+            # --only-binary=:all: ensures we only install prebuilt wheels.
+            # The bundled Python has no C compiler, so source-only packages
+            # (sdist) would fail to build. This flag forces pip to reject them.
             subprocess.run(
                 [exe, "-m", "pip", "install",
                  "--target", str(target_dir),
@@ -703,7 +710,10 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
         auth0_audience = os.environ.get("CLIPABIT_AUTH0_AUDIENCE", "")
         environment = os.environ.get("CLIPABIT_ENVIRONMENT", "prod")
 
-        # Detect partial Auth0 config (some set, some not)
+        # Detect partial Auth0 config (some set, some not).
+        # Partial config indicates a build-time error (env vars not fully set)
+        # and will cause confusing runtime auth failures. We fail loudly here
+        # to catch this at install time instead of letting users hit it later.
         auth0_vars = [auth0_domain, auth0_client_id, auth0_audience]
         any_set = any(auth0_vars)
         all_set = all(auth0_vars)
@@ -717,9 +727,16 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
             print_warning("Auth0 env vars not set. Skipping config.dat generation.")
 
         # --- Generate bootstrap shim (LAST) ---
+        # CRITICAL: We write the shim LAST in the install process. This ensures
+        # that if any earlier step fails (Python, deps, plugin files), Resolve
+        # won't show a broken "ClipABit" menu entry. The shim is the user-facing
+        # entry point, so it should only exist when the full installation is ready.
         print_info("Finalizing ClipABit installation...")
         shim_content = generate_bootstrap_shim(original_shim)
         try:
+            # Validate syntax before writing to catch template/merge errors.
+            # We don't want to write a broken Python file that would crash when
+            # Resolve tries to load it from the Scripts menu.
             compile(shim_content, "ClipABit.py", "exec")
         except SyntaxError as e:
             print_error(f"Generated bootstrap shim has syntax error: {e}")
