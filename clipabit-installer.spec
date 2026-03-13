@@ -13,7 +13,8 @@ a = Analysis(
     binaries=[],
     datas=[
         ('plugin', 'plugin'),
-        ('python', 'python'),
+        # Windows build downloads Python to build/python/python, not ./python
+        ('build/python/python', 'python'),
     ],
     hiddenimports=['tomllib'],
     hookspath=[],
