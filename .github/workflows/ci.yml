@@ -1,0 +1,304 @@
+name: CI
+
+on:
+  pull_request:
+    branches: [main]
+  push:
+    branches: [main]
+  workflow_dispatch:
+
+jobs:
+  # ============================================================================
+  # Run Python tests
+  # ============================================================================
+  test:
+    name: Run Tests
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-suffix: "installer-tests"
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install test dependencies
+        run: |
+          uv pip install pytest pytest-cov --system
+
+      - name: Run tests (no network, no build artifacts)
+        run: |
+          uv run pytest tests/ -m "not network and not build_artifact" --tb=short -v
+
+      - name: Run tests with coverage
+        run: |
+          uv run pytest tests/ -m "not network and not build_artifact" --cov=. --cov-report=xml --cov-report=term
+
+      - name: Upload coverage reports
+        uses: codecov/codecov-action@v4
+        with:
+          file: ./coverage.xml
+          flags: unittests
+          name: codecov-umbrella
+          fail_ci_if_error: false
+        continue-on-error: true
+
+  # ============================================================================
+  # Python linting and code quality
+  # ============================================================================
+  lint:
+    name: Lint Python Code
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Install ruff (replaces flake8, black, isort)
+        run: uv tool install ruff
+
+      - name: Run ruff linter
+        run: |
+          # Check for errors (syntax errors, undefined names, etc.)
+          uv tool run ruff check . --select=E9,F63,F7,F82
+          # Full lint with warnings
+          uv tool run ruff check . --exit-zero
+        continue-on-error: true
+
+      - name: Check code formatting with ruff
+        run: |
+          uv tool run ruff format --check .
+        continue-on-error: true
+
+  # ============================================================================
+  # Download plugin for build jobs (shared step)
+  # ============================================================================
+  prepare-plugin:
+    name: Download Plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Download latest plugin release
+        run: |
+          uv run installer-script.py --download-only --staging-dir .
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+          retention-days: 1
+
+  # ============================================================================
+  # Build macOS installer
+  # ============================================================================
+  build-macos:
+    name: Build macOS Installer
+    runs-on: macos-latest
+    needs: [test, prepare-plugin]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-suffix: "installer-build"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Cache bundled Python
+        uses: actions/cache@v4
+        with:
+          path: build/python
+          key: ${{ runner.os }}-python-3.11.12-20250529
+          restore-keys: |
+            ${{ runner.os }}-python-3.11
+
+      - name: Make scripts executable
+        run: |
+          chmod +x build-pkg.sh post-install-scripts/postinstall
+
+      - name: Build macOS package
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: "prod"
+        run: |
+          ./build-pkg.sh
+
+      - name: Verify .pkg was created
+        run: |
+          if [ ! -f dist/ClipABit.pkg ]; then
+            echo "ERROR: ClipABit.pkg not found in dist/"
+            exit 1
+          fi
+          ls -lh dist/ClipABit.pkg
+          echo "✅ macOS installer built successfully"
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-macOS-${{ github.sha }}
+          path: dist/ClipABit.pkg
+          retention-days: 7
+
+  # ============================================================================
+  # Build Windows installer
+  # ============================================================================
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    needs: [test, prepare-plugin]
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-suffix: "installer-build"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Cache bundled Python
+        uses: actions/cache@v4
+        with:
+          path: build/python
+          key: ${{ runner.os }}-python-3.11.12-20250529
+          restore-keys: |
+            ${{ runner.os }}-python-3.11
+
+      - name: Build Windows executable
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: "prod"
+        run: |
+          # Run the build script
+          .\build-exe.bat
+
+      - name: Verify .exe was created
+        run: |
+          if (!(Test-Path "dist/ClipABit-Installer.exe")) {
+            throw "ERROR: ClipABit-Installer.exe not found in dist/"
+          }
+          Get-Item dist/ClipABit-Installer.exe | Format-List
+          Write-Host "✅ Windows installer built successfully"
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-Windows-${{ github.sha }}
+          path: dist/ClipABit-Installer.exe
+          retention-days: 7
+
+  # ============================================================================
+  # Security scan
+  # ============================================================================
+  security:
+    name: Security Scan
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run Trivy vulnerability scanner
+        uses: aquasecurity/trivy-action@0.28.0
+        with:
+          scan-type: 'fs'
+          scan-ref: '.'
+          format: 'sarif'
+          output: 'trivy-results.sarif'
+        continue-on-error: true
+
+      - name: Upload Trivy results to GitHub Security
+        uses: github/codeql-action/upload-sarif@v3
+        with:
+          sarif_file: 'trivy-results.sarif'
+        continue-on-error: true
+
+  # ============================================================================
+  # Validate shell scripts
+  # ============================================================================
+  shellcheck:
+    name: ShellCheck
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Run ShellCheck on build scripts
+        run: |
+          sudo apt-get install -y shellcheck
+          shellcheck build-pkg.sh post-install-scripts/postinstall || true
+        continue-on-error: true
+
+  # ============================================================================
+  # Summary job (reports overall status)
+  # ============================================================================
+  ci-success:
+    name: CI Success
+    needs: [test, lint, build-macos, build-windows]
+    runs-on: ubuntu-latest
+    if: always()
+
+    steps:
+      - name: Check all jobs succeeded
+        run: |
+          if [ "${{ needs.test.result }}" != "success" ]; then
+            echo "❌ Tests failed"
+            exit 1
+          fi
+          if [ "${{ needs.build-macos.result }}" != "success" ]; then
+            echo "❌ macOS build failed"
+            exit 1
+          fi
+          if [ "${{ needs.build-windows.result }}" != "success" ]; then
+            echo "❌ Windows build failed"
+            exit 1
+          fi
+          echo "✅ All CI checks passed!"
