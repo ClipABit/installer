@@ -168,7 +168,9 @@ def _run_install(fake_plugin_dir, install_dirs, env_extra=None, fail_at=None):
 def test_fresh_install_succeeds(fake_plugin_dir, install_dirs):
     """All artifacts exist after a clean install."""
     scripts_dir, modules_dir, clipabit_dir, config_dir = install_dirs
-    assert _run_install(fake_plugin_dir, install_dirs) is True
+    success, resolve_was_running = _run_install(fake_plugin_dir, install_dirs)
+    assert success is True
+    assert resolve_was_running is False
     assert (scripts_dir / "ClipABit.py").exists()
     assert (modules_dir / "clipabit" / "__init__.py").exists()
     assert (clipabit_dir / "python").is_dir()
@@ -211,8 +213,8 @@ def test_fresh_install_auth0_partial_fails(fake_plugin_dir, install_dirs):
         "CLIPABIT_AUTH0_DOMAIN": "test.auth0.com",
         # Missing CLIENT_ID and AUDIENCE
     }
-    result = _run_install(fake_plugin_dir, install_dirs, env_extra=partial_auth0)
-    assert result is False
+    success, resolve_was_running = _run_install(fake_plugin_dir, install_dirs, env_extra=partial_auth0)
+    assert success is False
 
 
 def test_upgrade_replaces_all_artifacts(fake_plugin_dir, install_dirs):

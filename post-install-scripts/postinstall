@@ -69,16 +69,17 @@ echo "  ClipABit:   $CLIPABIT_DIR"
 # -------------------------------------------------------------------
 # Check if DaVinci Resolve is running
 # -------------------------------------------------------------------
-# Installing while Resolve is running can cause issues:
-#   - Resolve may have the old plugin loaded in memory
-#   - File locks may prevent overwriting plugin files
-# Require Resolve to be closed before proceeding.
+# We allow installation while Resolve is running, but warn the user
+# that they must restart Resolve for changes to take effect.
+# File operations will fail naturally if files are locked, triggering
+# the rollback mechanism.
+RESOLVE_WAS_RUNNING=0
 if pgrep -x "DaVinci Resolve" >/dev/null 2>&1; then
     echo ""
-    echo "ERROR: DaVinci Resolve is currently running."
-    echo "Please quit DaVinci Resolve and re-run the installer."
+    echo "WARNING: DaVinci Resolve is currently running."
+    echo "Installation will proceed, but you must restart Resolve for changes to take effect."
     echo ""
-    exit 1
+    RESOLVE_WAS_RUNNING=1
 fi
 
 # -------------------------------------------------------------------
@@ -427,6 +428,13 @@ echo "=========================================="
 echo ""
 echo "  ClipABit has been installed successfully."
 echo ""
+
+if [ "$RESOLVE_WAS_RUNNING" -eq 1 ]; then
+    echo "  ⚠️  DaVinci Resolve was running during installation."
+    echo "  ⚠️  You MUST restart DaVinci Resolve for ClipABit to work properly."
+    echo ""
+fi
+
 echo "  To access ClipABit in DaVinci Resolve:"
 echo "    1. Open DaVinci Resolve"
 echo "    2. Go to Workspace > Scripts > ClipABit"

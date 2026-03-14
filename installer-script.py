@@ -216,11 +216,11 @@ def get_clipabit_directory(override=None) -> Path:
 def check_resolve_running(skip=False) -> bool:
     """Check if DaVinci Resolve is currently running.
 
-    Returns True if safe to proceed (not running or skipped).
-    Returns False if Resolve is running (not safe to install).
+    Returns True if Resolve is running, False otherwise.
+    This is used to display a warning, not to block installation.
     """
     if skip:
-        return True
+        return False
 
     system = platform.system()
     try:
@@ -235,18 +235,18 @@ def check_resolve_running(skip=False) -> bool:
                 capture_output=True, text=True,
             )
         else:
-            return True
+            return False
 
         if result.returncode == 0:
             if system == "Windows" and "Resolve.exe" not in result.stdout:
-                return True
-            print_error("DaVinci Resolve is currently running.")
-            print_error("Please quit Resolve before running the installer.")
-            return False
-        return True
+                return False
+            print_warning("DaVinci Resolve is currently running.")
+            print_warning("Installation will proceed, but you must restart Resolve for changes to take effect.")
+            return True
+        return False
     except FileNotFoundError:
-        print_warning("Could not check if Resolve is running (command not found).")
-        return True
+        # Could not check - assume not running
+        return False
 
 def check_platform():
     system = platform.system()
@@ -648,23 +648,25 @@ def cleanup_backups(scripts_dir, modules_dir, clipabit_dir, config_dir):
 
 def install_plugin(plugin_dir: Path, skip_checks: bool = False,
                    scripts_dir=None, modules_dir=None, config_dir=None,
-                   clipabit_dir=None, bundled_python_dir=None) -> bool:
+                   clipabit_dir=None, bundled_python_dir=None) -> tuple[bool, bool]:
     """Full installation from a local plugin directory.
 
     All path parameters accept overrides for testability.  When *None*,
     platform defaults are used.
+
+    Returns (success, resolve_was_running) tuple.
     """
 
     # --- Pre-flight ---
     print_info("Verifying system compatibility...")
     if not check_platform():
-        return False
+        return False, False
 
+    resolve_was_running = False
     if not skip_checks:
         if not check_davinci_resolve():
-            return False
-        if not check_resolve_running():
-            return False
+            return False, False
+        resolve_was_running = check_resolve_running()
     else:
         print_warning("Skipping DaVinci Resolve / Resolve-running checks (--skip-checks).")
 
@@ -686,19 +688,19 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
     else:
         python_exe_path = check_python()
         if not python_exe_path:
-            return False
+            return False, False
         if not check_pip():
-            return False
+            return False, False
 
     # Validate plugin source
     original_shim = plugin_dir / "clipabit.py"
     if not original_shim.exists():
         print_error(f"Plugin shim not found: {original_shim}")
-        return False
+        return False, False
     pkg_source = plugin_dir / "clipabit"
     if not pkg_source.is_dir():
         print_error(f"Plugin package not found: {pkg_source}")
-        return False
+        return False, False
 
     # --- Backup existing installation ---
     print_info("Backing up existing ClipABit installation...")
@@ -780,11 +782,11 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
     except Exception as e:
         print_error(f"Installation failed: {e}")
         rollback(scripts_dir, modules_dir, clipabit_dir, config_dir)
-        return False
+        return False, False
 
     # --- Success: clean up backups ---
     cleanup_backups(scripts_dir, modules_dir, clipabit_dir, config_dir)
-    return True
+    return True, resolve_was_running
 
 
 # ---------------------------------------------------------------------------
@@ -909,8 +911,11 @@ def main():
         bundled_python_dir = None
 
     # Run full install
-    if not install_plugin(plugin_dir, skip_checks=args.skip_checks,
-                          bundled_python_dir=bundled_python_dir):
+    success, resolve_was_running = install_plugin(
+        plugin_dir, skip_checks=args.skip_checks,
+        bundled_python_dir=bundled_python_dir
+    )
+    if not success:
         print_error("Installation failed.")
         sys.exit(1)
 
@@ -921,6 +926,12 @@ def main():
         print_header("ClipABit Installation Complete!")
         print_success("ClipABit has been installed successfully.")
         print()
+
+        if resolve_was_running:
+            print_warning("⚠️  DaVinci Resolve was running during installation.")
+            print_warning("⚠️  You MUST restart DaVinci Resolve for ClipABit to work properly.")
+            print()
+
         print_info("To access ClipABit in DaVinci Resolve:")
         print("  1. Open DaVinci Resolve")
         print("  2. Go to Workspace > Scripts > ClipABit")
