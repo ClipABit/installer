@@ -26,6 +26,22 @@ SCRIPTS_DIR="${SCRIPT_DIR}/post-install-scripts"
 OUTPUT_DIR="${SCRIPT_DIR}/dist"
 
 # Bundled Python version
+# -------------------------------------------------------------------
+# IMPORTANT FOR DEVELOPERS:
+# The bundled Python runtime is sourced from python-build-standalone:
+# https://github.com/astral-sh/python-build-standalone/releases
+#
+# If you update PYTHON_VERSION or PYTHON_BUILD_TAG, you MUST update the
+# SHA256 checksums below. This is a security feature (Dependency Pinning)
+# that prevents supply-chain attacks and ensures every installer uses the
+# exact same byte-for-byte runtime.
+#
+# To get new SHAs:
+# 1. Visit the release page for the PYTHON_BUILD_TAG on GitHub.
+# 2. Find the .sha256 file for the corresponding platform archive OR
+#    calculate it manually after downloading:
+#    shasum -a 256 cpython-<version>+<tag>-<platform>-install_only.tar.gz
+# -------------------------------------------------------------------
 PYTHON_VERSION="3.11.12"
 PYTHON_BUILD_TAG="20250529"
 PYTHON_SHA256_ARM64="77d16e24444fa12096818064fcc3c12b041b0746f4481e3652fc60ee027a7fb5"

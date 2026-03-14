@@ -16,6 +16,21 @@ echo.
 REM -------------------------------------------------------------------
 REM Configuration
 REM -------------------------------------------------------------------
+REM IMPORTANT FOR DEVELOPERS:
+REM The bundled Python runtime is sourced from python-build-standalone:
+REM https://github.com/astral-sh/python-build-standalone/releases
+REM
+REM If you update PYTHON_VERSION or PYTHON_BUILD_TAG, you MUST update the
+REM SHA256 checksums below. This is a security feature (Dependency Pinning)
+REM that prevents supply-chain attacks and ensures every installer uses the
+REM exact same byte-for-byte runtime.
+REM
+REM To get new SHAs:
+REM 1. Visit the release page for the PYTHON_BUILD_TAG on GitHub.
+REM 2. Find the .sha256 file for the corresponding platform archive OR
+REM    calculate it manually after downloading:
+REM    certutil -hashfile cpython-<version>+<tag>-<platform>-install_only.tar.gz SHA256
+REM -------------------------------------------------------------------
 set PYTHON_VERSION=3.11.12
 set PYTHON_BUILD_TAG=20250529
 set PYTHON_SHA256=3258b902130179f72a3086ad87deccfa2f111faff54de444535d7b72d99f2b20
