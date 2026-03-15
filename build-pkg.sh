@@ -160,13 +160,27 @@ echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
 if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
-    echo "Plugin not found locally. Downloading latest release from GitHub..."
+    echo "Plugin not found locally. Downloading from GitHub..."
     
-    # Fetch the latest tag name using GitHub API
-    LATEST_TAG=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    # Check for jq (required for parsing GitHub API response)
+    if ! command -v jq &> /dev/null; then
+        echo "ERROR: 'jq' is not installed. It is required to parse GitHub API responses."
+        echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
+        exit 1
+    fi
+
+    if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
+        echo "  Staging environment detected. Fetching latest pre-release/release..."
+        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
+        LATEST_TAG=$(curl -s "$API_URL" | jq -r '.[0].tag_name')
+    else
+        echo "  Production environment. Fetching latest production release..."
+        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
+        LATEST_TAG=$(curl -s "$API_URL" | jq -r '.tag_name')
+    fi
     
-    if [ -z "$LATEST_TAG" ]; then
-        echo "ERROR: Could not fetch latest release tag from GitHub."
+    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+        echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
         exit 1
     fi
     
@@ -188,7 +202,8 @@ if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
     EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
     
     mkdir -p "${PLUGIN_DIR}"
-    cp -R "${EXTRACTED_DIR}/"* "${PLUGIN_DIR}/"
+    # Use rsync for better handling of file copies and excludes
+    rsync -av --progress "${EXTRACTED_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
     rm -rf "${TEMP_DIR}"
     echo "  Plugin downloaded and staged."
 fi
@@ -324,7 +339,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     BOM_CONTENTS=$(lsbom "${PKG_EXPAND_DIR}/expanded/Bom")
     
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
-        if echo "$BOM_CONTENTS" | grep -q "$required"; then
+        if grep -q "$required" <<< "$BOM_CONTENTS"; then
             echo "    OK: $required found in payload"
         else
             echo "    WARNING: $required not found in payload"
@@ -332,7 +347,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     done
     # Check excluded files
     for excluded in "tests/" "docs/" ".git/"; do
-        if echo "$BOM_CONTENTS" | grep -q "$excluded"; then
+        if grep -q "$excluded" <<< "$BOM_CONTENTS"; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
             echo "    OK: $excluded not in payload"

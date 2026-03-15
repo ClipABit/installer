@@ -56,6 +56,10 @@ REM 3. Find the .sha256 file for the corresponding platform archive OR
 REM    calculate it manually after downloading:
 REM    certutil -hashfile cpython-<version>+<tag>-<platform>-install_only.tar.gz SHA256
 REM -------------------------------------------------------------------
+REM -------------------------------------------------------------------
+set PYTHON_CACHE_DIR=%TEMP%\clipabit-python-cache
+REM -------------------------------------------------------------------
+
 set PYTHON_VERSION=3.11.15
 set PYTHON_BUILD_TAG=20260303
 set PYTHON_SHA256=6f194e1ede02260fd3d758893bbf1d3bb4084652d436a8300a229da721c3ddf8
@@ -153,12 +157,44 @@ echo      Bundled Python validated
 echo.
 echo [4/7] Downloading plugin from GitHub...
 if not exist "plugin\clipabit.py" (
-    python installer-script.py --download-only
-    if errorlevel 1 (
-        echo [ERROR] Failed to download plugin
+    if "%CLIPABIT_ENVIRONMENT%"=="staging" (
+        echo      Staging environment detected. Fetching latest pre-release/release...
+        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
+        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%')[0].tag_name"') do set LATEST_TAG=%%i
+    ) else (
+        echo      Production environment. Fetching latest production release...
+        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
+        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%').tag_name"') do set LATEST_TAG=%%i
+    )
+
+    if "!LATEST_TAG!"=="" (
+        echo [ERROR] Could not fetch release tag from GitHub API: !API_URL!
         pause
         exit /b 1
     )
+
+    echo      Latest release: !LATEST_TAG!
+    set ARCHIVE_URL=https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/!LATEST_TAG!.zip
+    
+    echo      Downloading !ARCHIVE_URL!...
+    curl -fSL -o "%TEMP%\plugin.zip" "!ARCHIVE_URL!"
+    if errorlevel 1 (
+        echo [ERROR] Failed to download plugin archive.
+        pause
+        exit /b 1
+    )
+
+    echo      Extracting...
+    tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
+    
+    REM Find the extracted folder and copy its contents
+    for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
+        xcopy "%%d" "plugin\" /E /I /Y >nul
+        goto :plugin_copied
+    )
+    :plugin_copied
+    del "%TEMP%\plugin.zip" >nul 2>&1
+    echo      Plugin downloaded and staged.
 ) else (
     echo      Plugin already present, skipping download
 )
