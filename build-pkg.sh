@@ -293,12 +293,30 @@ chmod +x "${PAYLOAD_DIR}/ClipABit/installer-script.py"
 # Build .pkg
 # -------------------------------------------------------------------
 echo "Building package..."
+# 1. Build the component package first
+COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
 pkgbuild \
     --root "${PAYLOAD_DIR}" \
     --scripts "${SCRIPTS_DIR}" \
     --identifier "${PKG_IDENTIFIER}" \
     --version "${PKG_VERSION}" \
     --install-location "${INSTALL_LOCATION}" \
+    "${COMPONENT_PKG}"
+
+# 2. Synthesize distribution file and use productbuild for the final package
+# This allows us to include resources like Conclusion.html for the final screen.
+DISTRIBUTION_XML="${BUILD_DIR}/distribution.xml"
+productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
+
+# Modify distribution.xml to include conclusion resource
+# (sed -i on macOS needs an empty string for the extension)
+sed -i '' "s|</installer-script>|<conclusion file=\"Conclusion.html\" />\n</installer-script>|" "${DISTRIBUTION_XML}"
+
+productbuild \
+    --distribution "${DISTRIBUTION_XML}" \
+    --resources "${SCRIPT_DIR}/installer-resources" \
+    --package-path "${BUILD_DIR}" \
+    --version "${PKG_VERSION}" \
     "${OUTPUT_DIR}/${PKG_NAME}.pkg"
 
 # -------------------------------------------------------------------
@@ -319,23 +337,40 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     pkgutil --expand "${OUTPUT_DIR}/${PKG_NAME}.pkg" "${PKG_EXPAND_DIR}/expanded"
 
     # Check for required files
-    # Note: we must use lsbom or expand the Payload to see the actual files.
-    # We use 'lsbom' on the Bom file which is much faster than extracting.
-    BOM_CONTENTS=$(lsbom "${PKG_EXPAND_DIR}/expanded/Bom")
+    # Note: for productbuild, the component packages are expanded into subdirectories.
+    # We find all 'Bom' files and check them.
+    BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
     
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
-        if echo "$BOM_CONTENTS" | grep -q "$required"; then
-            echo "    OK: $required found in payload"
+        FOUND=0
+        for bom in ${BOM_FILES}; do
+            if lsbom "${bom}" | grep -q "${required}"; then
+                FOUND=1
+                break
+            fi
+        done
+        
+        if [ "${FOUND}" -eq 1 ]; then
+            echo "    OK: ${required} found in payload"
         else
-            echo "    WARNING: $required not found in payload"
+            echo "    WARNING: ${required} not found in payload"
         fi
     done
+    
     # Check excluded files
     for excluded in "tests/" "docs/" ".git/"; do
-        if echo "$BOM_CONTENTS" | grep -q "$excluded"; then
-            echo "    WARNING: $excluded found in payload (should be excluded)"
+        FOUND_EXCLUDED=0
+        for bom in ${BOM_FILES}; do
+            if lsbom "${bom}" | grep -q "${excluded}"; then
+                FOUND_EXCLUDED=1
+                break
+            fi
+        done
+        
+        if [ "${FOUND_EXCLUDED}" -eq 1 ]; then
+            echo "    WARNING: ${excluded} found in payload (should be excluded)"
         else
-            echo "    OK: $excluded not in payload"
+            echo "    OK: ${excluded} not in payload"
         fi
     done
 
