@@ -339,7 +339,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     BOM_CONTENTS=$(lsbom "${PKG_EXPAND_DIR}/expanded/Bom")
     
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
-        if echo "$BOM_CONTENTS" | grep -q "$required"; then
+        if grep -q "$required" <<< "$BOM_CONTENTS"; then
             echo "    OK: $required found in payload"
         else
             echo "    WARNING: $required not found in payload"
@@ -347,7 +347,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     done
     # Check excluded files
     for excluded in "tests/" "docs/" ".git/"; do
-        if echo "$BOM_CONTENTS" | grep -q "$excluded"; then
+        if grep -q "$excluded" <<< "$BOM_CONTENTS"; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
             echo "    OK: $excluded not in payload"
