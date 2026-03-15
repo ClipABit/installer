@@ -155,25 +155,30 @@ if errorlevel 1 (
 echo      Bundled Python validated
 
 echo.
-echo [4/7] Downloading plugin from GitHub...
-if not exist "plugin\clipabit.py" (
-    if "%CLIPABIT_ENVIRONMENT%"=="staging" (
-        echo      Staging environment detected. Fetching latest pre-release/release...
-        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
-        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%')[0].tag_name"') do set LATEST_TAG=%%i
-    ) else (
-        echo      Production environment. Fetching latest production release...
-        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
-        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%').tag_name"') do set LATEST_TAG=%%i
-    )
+echo [4/7] Retrieving plugin release...
+REM Fetch metadata regardless of whether we need to download, to ensure correct labeling.
+if "%CLIPABIT_ENVIRONMENT%"=="staging" (
+    echo      Staging environment detected. Fetching latest pre-release/release metadata...
+    set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
+    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%')[0].tag_name"') do set LATEST_TAG=%%i
+) else if "%CLIPABIT_ENVIRONMENT%"=="prod" (
+    echo      Production environment. Fetching latest production release metadata...
+    set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
+    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%').tag_name"') do set LATEST_TAG=%%i
+)
 
+if not "!LATEST_TAG!"=="" (
+    echo      Latest release tag: !LATEST_TAG!
+)
+
+if not exist "plugin\clipabit.py" (
+    echo      Plugin not found locally. Downloading from GitHub...
     if "!LATEST_TAG!"=="" (
         echo [ERROR] Could not fetch release tag from GitHub API: !API_URL!
         pause
         exit /b 1
     )
 
-    echo      Latest release: !LATEST_TAG!
     set ARCHIVE_URL=https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/!LATEST_TAG!.zip
     
     echo      Downloading !ARCHIVE_URL!...
@@ -239,6 +244,9 @@ echo      All dependencies have binary wheels
 
 echo.
 echo [6/7] Building Windows executable...
+echo      Baking plugin release: %LATEST_TAG%
+REM Create release.json for metadata (read by installer-script.py)
+echo {"tag": "%LATEST_TAG%", "environment": "%CLIPABIT_ENVIRONMENT%"} > release.json
 pyinstaller clipabit-installer.spec
 if errorlevel 1 (
     echo [ERROR] Build failed!
