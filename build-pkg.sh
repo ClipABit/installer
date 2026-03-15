@@ -38,14 +38,17 @@ OUTPUT_DIR="${SCRIPT_DIR}/dist"
 #
 # To get new SHAs:
 # 1. Visit the release page for the PYTHON_BUILD_TAG on GitHub.
-# 2. Find the .sha256 file for the corresponding platform archive OR
+# 2. IMPORTANT: Look ONLY for the "install_only" variants (e.g. cpython-...-install_only.tar.gz).
+#    Ignore "debug", "pgo", "lto", or "full" variants as they are much larger and not needed.
+# 3. Find the .sha256 file for the corresponding platform archive OR
 #    calculate it manually after downloading:
 #    shasum -a 256 cpython-<version>+<tag>-<platform>-install_only.tar.gz
 # -------------------------------------------------------------------
-PYTHON_VERSION="3.11.12"
-PYTHON_BUILD_TAG="20250529"
-PYTHON_SHA256_ARM64="77d16e24444fa12096818064fcc3c12b041b0746f4481e3652fc60ee027a7fb5"
-PYTHON_SHA256_X64="1fc7ee75b37a309443d5a214b83733cfda5ae7597559fb39ab8906f09c997c93"
+PYTHON_VERSION="3.11.15"
+PYTHON_BUILD_TAG="20260303"
+PYTHON_SHA256_ARM64="0d29ed7cb6711890b3c6da27b6258c4ad3b506bf8d5a381bff531ca8fa67417f"
+PYTHON_SHA256_X64="6ea2168c4e18cb31d9dc8486634dc375929bcc2adde0957399ce59d90b52297a"
+# -------------------------------------------------------------------
 PYTHON_CACHE_DIR="${BUILD_DIR}/python"
 
 echo "=================================="
@@ -58,15 +61,18 @@ echo ""
 # -------------------------------------------------------------------
 CLIPABIT_ENVIRONMENT="${CLIPABIT_ENVIRONMENT:-prod}"
 
-if [ -z "$CLIPABIT_AUTH0_DOMAIN" ] || [ -z "$CLIPABIT_AUTH0_CLIENT_ID" ] || [ -z "$CLIPABIT_AUTH0_AUDIENCE" ]; then
-    echo "WARNING: Auth0 env vars not fully set."
-    echo "  CLIPABIT_AUTH0_DOMAIN=${CLIPABIT_AUTH0_DOMAIN:-(empty)}"
-    echo "  CLIPABIT_AUTH0_CLIENT_ID=${CLIPABIT_AUTH0_CLIENT_ID:-(empty)}"
-    echo "  CLIPABIT_AUTH0_AUDIENCE=${CLIPABIT_AUTH0_AUDIENCE:-(empty)}"
+if [ -z "$CLIPABIT_AUTH0_DOMAIN" ] || [ -z "$CLIPABIT_AUTH0_CLIENT_ID" ] || [ -z "$CLIPABIT_AUTH0_AUDIENCE" ] || [ -z "$CLIPABIT_ENVIRONMENT" ]; then
+    echo "ERROR: Auth0 environment variables are not fully set."
+    echo "  CLIPABIT_AUTH0_DOMAIN=${CLIPABIT_AUTH0_DOMAIN:-(missing)}"
+    echo "  CLIPABIT_AUTH0_CLIENT_ID=${CLIPABIT_AUTH0_CLIENT_ID:-(missing)}"
+    echo "  CLIPABIT_AUTH0_AUDIENCE=${CLIPABIT_AUTH0_AUDIENCE:-(missing)}"
+    echo "  CLIPABIT_ENVIRONMENT=${CLIPABIT_ENVIRONMENT:-(missing)}"
     echo ""
-    echo "The installer will still build but config.dat won't be written at install time."
-    echo ""
+    echo "The installer requires these values to be 'baked in' at build time."
+    echo "Please export them in your terminal before running this script."
+    exit 1
 fi
+echo "Auth0 configuration validated."
 
 # -------------------------------------------------------------------
 # Clean previous builds (preserve python cache)
@@ -154,8 +160,37 @@ echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
 if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
-    echo "Plugin not found locally. Downloading from GitHub..."
-    python3 "${SCRIPT_DIR}/installer-script.py" --download-only --staging-dir "${SCRIPT_DIR}"
+    echo "Plugin not found locally. Downloading latest release from GitHub..."
+    
+    # Fetch the latest tag name using GitHub API
+    LATEST_TAG=$(curl -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+    
+    if [ -z "$LATEST_TAG" ]; then
+        echo "ERROR: Could not fetch latest release tag from GitHub."
+        exit 1
+    fi
+    
+    echo "  Latest release: ${LATEST_TAG}"
+    ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
+    
+    TEMP_DIR=$(mktemp -d)
+    echo "  Downloading ${ARCHIVE_URL}..."
+    if ! curl -fSL -o "${TEMP_DIR}/plugin.zip" "${ARCHIVE_URL}"; then
+        echo "ERROR: Failed to download plugin archive."
+        rm -rf "${TEMP_DIR}"
+        exit 1
+    fi
+    
+    echo "  Extracting..."
+    unzip -q "${TEMP_DIR}/plugin.zip" -d "${TEMP_DIR}"
+    
+    # Find the extracted folder (it will be named Resolve-Plugin-<tag>)
+    EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
+    
+    mkdir -p "${PLUGIN_DIR}"
+    cp -R "${EXTRACTED_DIR}/"* "${PLUGIN_DIR}/"
+    rm -rf "${TEMP_DIR}"
+    echo "  Plugin downloaded and staged."
 fi
 
 # Validate plugin
@@ -284,9 +319,12 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     pkgutil --expand "${OUTPUT_DIR}/${PKG_NAME}.pkg" "${PKG_EXPAND_DIR}/expanded"
 
     # Check for required files
-    PAYLOAD_CONTENTS=$(cd "${PKG_EXPAND_DIR}/expanded" && find . -type f 2>/dev/null || true)
+    # Note: we must use lsbom or expand the Payload to see the actual files.
+    # We use 'lsbom' on the Bom file which is much faster than extracting.
+    BOM_CONTENTS=$(lsbom "${PKG_EXPAND_DIR}/expanded/Bom")
+    
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
-        if echo "$PAYLOAD_CONTENTS" | grep -q "$required"; then
+        if echo "$BOM_CONTENTS" | grep -q "$required"; then
             echo "    OK: $required found in payload"
         else
             echo "    WARNING: $required not found in payload"
@@ -294,7 +332,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     done
     # Check excluded files
     for excluded in "tests/" "docs/" ".git/"; do
-        if echo "$PAYLOAD_CONTENTS" | grep -q "$excluded"; then
+        if echo "$BOM_CONTENTS" | grep -q "$excluded"; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
             echo "    OK: $excluded not in payload"

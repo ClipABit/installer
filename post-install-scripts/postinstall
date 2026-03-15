@@ -13,13 +13,24 @@ set -e
 # Detect the real user (even when running as root via installer)
 # -------------------------------------------------------------------
 # The macOS installer runs this script as root, but we need to install files
-# in the actual user's home directory (~/Library/...). We detect the real
-# user via /dev/console ownership to find the correct home directory.
-CURRENT_USER="${USER:-$(whoami)}"
-if [ "$CURRENT_USER" = "root" ]; then
+# in the actual user's home directory (~/Library/...). 
+if [ "$USER" != "" ] && [ "$USER" != "root" ]; then
+    CURRENT_USER="$USER"
+else
+    # Fallback: Detect the user currently logged into the graphical console
     CURRENT_USER=$(stat -f "%Su" /dev/console)
 fi
-USER_HOME=$(eval echo "~$CURRENT_USER")
+
+# Final safety check: if we still don't have a valid user, we can't proceed safely
+if [ -z "$CURRENT_USER" ] || [ "$CURRENT_USER" = "root" ]; then
+    echo "ERROR: Could not detect the logged-in user. Please ensure you are running the installer from a user session."
+    exit 1
+fi
+
+USER_HOME=$(dscl . -read "/Users/$CURRENT_USER" NFSHomeDirectory | awk '{print $2}')
+if [ -z "$USER_HOME" ]; then
+    USER_HOME=$(eval echo "~$CURRENT_USER")
+fi
 
 # -------------------------------------------------------------------
 # Logging — tee all output to a timestamped log file
@@ -281,11 +292,11 @@ AUTH0_CLIENT_ID="__AUTH0_CLIENT_ID__"
 AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
 ENVIRONMENT="__ENVIRONMENT__"
 
-if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0_DOMAIN__" ]; then
-    # Detect partial Auth0 config (some values set, some placeholders remaining).
-    # Partial config indicates a build-time error and will cause confusing
-    # runtime failures, so we fail loudly here instead.
-    if [ "$AUTH0_CLIENT_ID" = "__AUTH0_CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0_AUDIENCE__" ]; then
+# We break up the sentinel strings in the check below so that 'sed' during 
+# build-pkg.sh doesn't replace them, only replacing the assignments above.
+if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0"_"DOMAIN__" ]; then
+    # Detect partial Auth0 config
+    if [ "$AUTH0_CLIENT_ID" = "__AUTH0"_"CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0"_"AUDIENCE__" ]; then
         echo "ERROR: Auth0 config partially templated. Domain set but client_id or audience missing."
         do_rollback
         exit 1
@@ -316,7 +327,10 @@ with open(config_path, 'w') as f:
 print('  Config written: ' + config_path)
 "
 else
-    echo "  Auth0 values not baked in. Skipping config.dat."
+    echo "  WARNING: Auth0 configuration was not provided at build time."
+    echo "  The installer will skip creating config.dat, so the plugin will not have"
+    echo "  authentication credentials. Please set CLIPABIT_AUTH0_* environment"
+    echo "  variables before building the installer."
 fi
 
 # -------------------------------------------------------------------

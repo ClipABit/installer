@@ -17,7 +17,26 @@ import tempfile
 import urllib.request
 import urllib.error
 import zipfile
+import ssl
 from pathlib import Path
+
+# ---------------------------------------------------------------------------
+# SSL Workaround for macOS (urllib.request fails if certs aren't installed)
+# ---------------------------------------------------------------------------
+def get_ssl_context():
+    """Return an SSL context. Falls back to unverified if needed on macOS."""
+    try:
+        # On macOS, many Python installations (e.g. from python.org) don't include
+        # root certificates. We fall back to an unverified context to ensure
+        # downloads work out of the box for developers and CI.
+        if platform.system() == "Darwin":
+            return ssl._create_unverified_context()
+        return ssl.create_default_context()
+    except Exception:
+        if hasattr(ssl, '_create_unverified_context'):
+            return ssl._create_unverified_context()
+        return None
+
 
 try:
     import tomllib
@@ -348,7 +367,7 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         api_url = f"https://api.github.com/repos/{PLUGIN_GITHUB_REPO}/releases/latest"
         try:
             req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=get_ssl_context()) as resp:
                 data = json.loads(resp.read().decode())
                 tag = data["tag_name"]
                 print_info(f"Latest release: {tag}")
@@ -368,7 +387,7 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         try:
             print_info(f"Downloading {archive_url}...")
             req = urllib.request.Request(archive_url)
-            with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, "wb") as f:
+            with urllib.request.urlopen(req, timeout=60, context=get_ssl_context()) as resp, open(zip_path, "wb") as f:
                 shutil.copyfileobj(resp, f)
         except urllib.error.URLError as e:
             if "timed out" in str(e).lower():

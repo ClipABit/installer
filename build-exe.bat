@@ -16,6 +16,29 @@ echo.
 REM -------------------------------------------------------------------
 REM Configuration
 REM -------------------------------------------------------------------
+IF "%CLIPABIT_ENVIRONMENT%"=="" SET CLIPABIT_ENVIRONMENT=prod
+
+IF "%CLIPABIT_AUTH0_DOMAIN%"=="" GOTO :MISSING_AUTH0
+IF "%CLIPABIT_AUTH0_CLIENT_ID%"=="" GOTO :MISSING_AUTH0
+IF "%CLIPABIT_AUTH0_AUDIENCE%"=="" GOTO :MISSING_AUTH0
+IF "%CLIPABIT_ENVIRONMENT%"=="" GOTO :MISSING_AUTH0
+
+echo [0/7] Auth0 configuration validated.
+GOTO :CONFIG_OK
+
+:MISSING_AUTH0
+echo [ERROR] Auth0 environment variables are not fully set.
+echo   CLIPABIT_AUTH0_DOMAIN=%CLIPABIT_AUTH0_DOMAIN%
+echo   CLIPABIT_AUTH0_CLIENT_ID=%CLIPABIT_AUTH0_CLIENT_ID%
+echo   CLIPABIT_AUTH0_AUDIENCE=%CLIPABIT_AUTH0_AUDIENCE%
+echo   CLIPABIT_ENVIRONMENT=%CLIPABIT_ENVIRONMENT%
+echo.
+echo The installer requires these values to be 'baked in' at build time.
+echo Please set them in your terminal before running this script.
+pause
+exit /b 1
+
+:CONFIG_OK
 REM IMPORTANT FOR DEVELOPERS:
 REM The bundled Python runtime is sourced from python-build-standalone:
 REM https://github.com/astral-sh/python-build-standalone/releases
@@ -27,14 +50,16 @@ REM exact same byte-for-byte runtime.
 REM
 REM To get new SHAs:
 REM 1. Visit the release page for the PYTHON_BUILD_TAG on GitHub.
-REM 2. Find the .sha256 file for the corresponding platform archive OR
+REM 2. IMPORTANT: Look ONLY for the "install_only" variants (e.g. cpython-...-install_only.tar.gz).
+REM    Ignore "debug", "pgo", "lto", or "full" variants as they are much larger and not needed.
+REM 3. Find the .sha256 file for the corresponding platform archive OR
 REM    calculate it manually after downloading:
 REM    certutil -hashfile cpython-<version>+<tag>-<platform>-install_only.tar.gz SHA256
 REM -------------------------------------------------------------------
-set PYTHON_VERSION=3.11.12
-set PYTHON_BUILD_TAG=20250529
-set PYTHON_SHA256=3258b902130179f72a3086ad87deccfa2f111faff54de444535d7b72d99f2b20
-set PYTHON_CACHE_DIR=build\python
+set PYTHON_VERSION=3.11.15
+set PYTHON_BUILD_TAG=20260303
+set PYTHON_SHA256=6f194e1ede02260fd3d758893bbf1d3bb4084652d436a8300a229da721c3ddf8
+REM -------------------------------------------------------------------
 
 REM Check if Python is installed (for build tooling — not the bundled runtime)
 REM NOTE: This is the HOST Python used to run PyInstaller, not the bundled
