@@ -56,6 +56,10 @@ REM 3. Find the .sha256 file for the corresponding platform archive OR
 REM    calculate it manually after downloading:
 REM    certutil -hashfile cpython-<version>+<tag>-<platform>-install_only.tar.gz SHA256
 REM -------------------------------------------------------------------
+REM -------------------------------------------------------------------
+set PYTHON_CACHE_DIR=%TEMP%\clipabit-python-cache
+REM -------------------------------------------------------------------
+
 set PYTHON_VERSION=3.11.15
 set PYTHON_BUILD_TAG=20260303
 set PYTHON_SHA256=6f194e1ede02260fd3d758893bbf1d3bb4084652d436a8300a229da721c3ddf8
