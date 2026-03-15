@@ -310,12 +310,30 @@ chmod +x "${PAYLOAD_DIR}/ClipABit/installer-script.py"
 echo "Building package..."
 # 1. Build the component package first
 COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
+# 1. Build the component package first
+COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
 pkgbuild \
     --root "${PAYLOAD_DIR}" \
     --scripts "${SCRIPTS_DIR}" \
     --identifier "${PKG_IDENTIFIER}" \
     --version "${PKG_VERSION}" \
     --install-location "${INSTALL_LOCATION}" \
+    "${COMPONENT_PKG}"
+
+# 2. Synthesize distribution file and use productbuild for the final package
+# This allows us to include resources like Conclusion.html for the final screen.
+DISTRIBUTION_XML="${BUILD_DIR}/distribution.xml"
+productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
+
+# Modify distribution.xml to include conclusion resource
+# (sed -i on macOS needs an empty string for the extension)
+sed -i '' "s|</installer-script>|<conclusion file=\"Conclusion.html\" />\n</installer-script>|" "${DISTRIBUTION_XML}"
+
+productbuild \
+    --distribution "${DISTRIBUTION_XML}" \
+    --resources "${SCRIPT_DIR}/installer-resources" \
+    --package-path "${BUILD_DIR}" \
+    --version "${PKG_VERSION}" \
     "${COMPONENT_PKG}"
 
 # 2. Synthesize distribution file and use productbuild for the final package
@@ -355,6 +373,9 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
     # Note: for productbuild, the component packages are expanded into subdirectories.
     # We find all 'Bom' files and check them.
     BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
+    # Note: for productbuild, the component packages are expanded into subdirectories.
+    # We find all 'Bom' files and check them.
+    BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
     
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
         FOUND=0
@@ -368,8 +389,10 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
             echo "    OK: $required found in payload"
         else
             echo "    WARNING: ${required} not found in payload"
+            echo "    WARNING: ${required} not found in payload"
         fi
     done
+    
     
     # Check excluded files
     for excluded in "tests/" "docs/" ".git/"; do
@@ -383,6 +406,7 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
         if grep -q "$excluded" <<< "$BOM_CONTENTS"; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
+            echo "    OK: ${excluded} not in payload"
             echo "    OK: ${excluded} not in payload"
         fi
     done
