@@ -12,11 +12,48 @@ set -e
 # -------------------------------------------------------------------
 # Detect the real user (even when running as root via installer)
 # -------------------------------------------------------------------
-CURRENT_USER="${USER:-$(whoami)}"
-if [ "$CURRENT_USER" = "root" ]; then
+# The macOS installer runs this script as root, but we need to install files
+# in the actual user's home directory (~/Library/...). 
+if [ "$USER" != "" ] && [ "$USER" != "root" ]; then
+    CURRENT_USER="$USER"
+else
+    # Fallback: Detect the user currently logged into the graphical console
     CURRENT_USER=$(stat -f "%Su" /dev/console)
 fi
-USER_HOME=$(eval echo "~$CURRENT_USER")
+
+# Final safety check: if we still don't have a valid user, we can't proceed safely
+if [ -z "$CURRENT_USER" ] || [ "$CURRENT_USER" = "root" ]; then
+    echo "ERROR: Could not detect the logged-in user. Please ensure you are running the installer from a user session."
+    exit 1
+fi
+
+USER_HOME=$(dscl . -read "/Users/$CURRENT_USER" NFSHomeDirectory | awk '{print $2}')
+if [ -z "$USER_HOME" ]; then
+    USER_HOME=$(eval echo "~$CURRENT_USER")
+fi
+
+# -------------------------------------------------------------------
+# Logging — tee all output to a timestamped log file
+# -------------------------------------------------------------------
+# We provide two levels of output:
+#   - User-facing: clean output shown in the installer UI
+#   - Debug log: full detail including shell tracing (set -x) for troubleshooting
+# BASH_XTRACEFD=3 sends trace output to the log file only, not stdout.
+LOG_DIR="$USER_HOME/Library/Logs/ClipABit"
+sudo -u "$CURRENT_USER" mkdir -p "$LOG_DIR"
+LOG_FILE="$LOG_DIR/install-$(date '+%Y%m%d-%H%M%S').log"
+
+# Send stdout+stderr to both terminal and log file.
+# Also enable shell tracing (set -x) but route trace output to the log
+# file only, so the user sees clean output while the log has full detail.
+exec 3>"$LOG_FILE"
+BASH_XTRACEFD=3
+set -x
+exec > >(tee -a "$LOG_FILE") 2>&1
+
+echo "ClipABit Install Log: $(date)"
+echo "Log file: $LOG_FILE"
+echo ""
 
 echo "Running ClipABit Plugin Installer..."
 echo "  User: $CURRENT_USER"
@@ -30,12 +67,31 @@ STAGING_DIR="$2/ClipABit"
 FUSION_BASE="$USER_HOME/Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion"
 SCRIPTS_UTILITY="$FUSION_BASE/Scripts/Utility"
 MODULES_DIR="$FUSION_BASE/Modules"
-CONFIG_DIR="$USER_HOME/Library/Application Support/ClipABit"
+CLIPABIT_DIR="$USER_HOME/Library/Application Support/ClipABit"
+CONFIG_DIR="$CLIPABIT_DIR"
 
 PLUGIN_SOURCE="${STAGING_DIR}/plugin"
+BUNDLED_PYTHON_SOURCE="${STAGING_DIR}/python"
 
-echo "  Staging: $STAGING_DIR"
-echo "  Fusion:  $FUSION_BASE"
+echo "  Staging:    $STAGING_DIR"
+echo "  Fusion:     $FUSION_BASE"
+echo "  ClipABit:   $CLIPABIT_DIR"
+
+# -------------------------------------------------------------------
+# Check if DaVinci Resolve is running
+# -------------------------------------------------------------------
+# We allow installation while Resolve is running, but warn the user
+# that they must restart Resolve for changes to take effect.
+# File operations will fail naturally if files are locked, triggering
+# the rollback mechanism.
+RESOLVE_WAS_RUNNING=0
+if pgrep -x "DaVinci Resolve" >/dev/null 2>&1; then
+    echo ""
+    echo "WARNING: DaVinci Resolve is currently running."
+    echo "Installation will proceed, but you must restart Resolve for changes to take effect."
+    echo ""
+    RESOLVE_WAS_RUNNING=1
+fi
 
 # -------------------------------------------------------------------
 # Validate staging
@@ -44,14 +100,17 @@ if [ ! -f "${PLUGIN_SOURCE}/clipabit.py" ]; then
     echo "ERROR: Plugin shim not found at ${PLUGIN_SOURCE}/clipabit.py"
     exit 1
 fi
-
 if [ ! -f "${PLUGIN_SOURCE}/pyproject.toml" ]; then
     echo "ERROR: pyproject.toml not found at ${PLUGIN_SOURCE}/pyproject.toml"
     exit 1
 fi
-
 if [ ! -d "${PLUGIN_SOURCE}/clipabit" ]; then
     echo "ERROR: clipabit package not found at ${PLUGIN_SOURCE}/clipabit"
+    exit 1
+fi
+if [ ! -d "${BUNDLED_PYTHON_SOURCE}" ]; then
+    echo "ERROR: Bundled Python not found at ${BUNDLED_PYTHON_SOURCE}"
+    echo "Installer package appears corrupt or incomplete."
     exit 1
 fi
 
@@ -61,30 +120,229 @@ fi
 echo "Creating directories..."
 sudo -u "$CURRENT_USER" mkdir -p "$SCRIPTS_UTILITY"
 sudo -u "$CURRENT_USER" mkdir -p "$MODULES_DIR"
-sudo -u "$CURRENT_USER" mkdir -p "$CONFIG_DIR"
+sudo -u "$CURRENT_USER" mkdir -p "$CLIPABIT_DIR"
 
 # -------------------------------------------------------------------
-# Generate and install bootstrap shim
+# Backup existing installation
 # -------------------------------------------------------------------
-echo "Generating bootstrap shim..."
+# Atomic install pattern: backup → install → cleanup_backups (or rollback on failure)
+# This ensures we can always restore the previous working installation if
+# anything goes wrong during the install process.
+echo "Backing up existing ClipABit installation..."
+backup_item() {
+    local item="$1"
+    local bak="${item}.bak"
+    if [ -e "$bak" ]; then
+        rm -rf "$bak"
+    fi
+    if [ -e "$item" ]; then
+        mv "$item" "$bak"
+    fi
+}
 
-# Find python3 (3.12+ required for tomllib and project)
-PYTHON_CMD="/usr/bin/python3"
+backup_item "$SCRIPTS_UTILITY/ClipABit.py"
+backup_item "$MODULES_DIR/clipabit"
+backup_item "$CLIPABIT_DIR/python"
+backup_item "$CLIPABIT_DIR/deps"
+backup_item "$CONFIG_DIR/config.dat"
+
+# Rollback function for failure recovery
+do_rollback() {
+    echo "Rolling back to previous installation..."
+    local items=(
+        "$SCRIPTS_UTILITY/ClipABit.py"
+        "$MODULES_DIR/clipabit"
+        "$CLIPABIT_DIR/python"
+        "$CLIPABIT_DIR/deps"
+        "$CONFIG_DIR/config.dat"
+    )
+    for item in "${items[@]}"; do
+        local bak="${item}.bak"
+        if [ -e "$item" ]; then
+            rm -rf "$item"
+        fi
+        if [ -e "$bak" ]; then
+            mv "$bak" "$item"
+        fi
+    done
+}
+
+# -------------------------------------------------------------------
+# Install bundled Python runtime
+# -------------------------------------------------------------------
+echo "Installing ClipABit Python runtime..."
+sudo -u "$CURRENT_USER" cp -R "${BUNDLED_PYTHON_SOURCE}" "$CLIPABIT_DIR/python"
+chown -R "$CURRENT_USER:staff" "$CLIPABIT_DIR/python"
+
+# Remove quarantine xattr - macOS sets this on downloaded/extracted files.
+# The bundled Python is unsigned, so Gatekeeper would block it without this.
+xattr -dr com.apple.quarantine "$CLIPABIT_DIR/python" 2>/dev/null || true
+
+# Validate Python after install (INSTALL-TIME check on end user's machine)
+# This is different from the build-time check in build-pkg.sh:
+#   - Build-time: validates downloaded Python works on developer machine
+#   - Install-time: validates Python after copying, permission changes, and
+#     quarantine removal on the end user's machine. Triggers rollback on failure.
+PYTHON_CMD="$CLIPABIT_DIR/python/bin/python3"
 if [ ! -x "$PYTHON_CMD" ]; then
-    PYTHON_CMD=$(which python3 2>/dev/null || true)
-fi
-if [ -z "$PYTHON_CMD" ]; then
-    echo "ERROR: python3 not found"
+    echo "ERROR: Bundled Python not found after copy"
+    do_rollback
     exit 1
 fi
-PYTHON_VERSION=$("$PYTHON_CMD" -c "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,12) else 1)" 2>/dev/null) || true
-if [ -z "$PYTHON_VERSION" ] || ! "$PYTHON_CMD" -c "import sys; sys.exit(0 if sys.version_info >= (3,12) else 1)" 2>/dev/null; then
-    echo "ERROR: Python 3.12 or newer is required (found: $("$PYTHON_CMD" --version 2>/dev/null || echo 'unknown')). Install from https://www.python.org/downloads/ or use pyenv."
+PYTHON_REPORTED=$("$PYTHON_CMD" --version 2>&1 | awk '{print $2}')
+if [[ ! "${PYTHON_REPORTED}" == 3.11.* ]]; then
+    echo "ERROR: Bundled Python reports ${PYTHON_REPORTED}, expected 3.11.x"
+    do_rollback
     exit 1
 fi
-echo "  Python: $PYTHON_VERSION"
+echo "  Python: $PYTHON_REPORTED"
 
-# Generate shim inline (bootstrap preamble + original clipabit.py)
+# Validate pip is available after Python installation
+# Some Python builds may not include pip by default, so we use ensurepip
+# as a fallback to bootstrap it if needed.
+if ! "$PYTHON_CMD" -m pip --version >/dev/null 2>&1; then
+    echo "  pip not found, trying ensurepip..."
+    "$PYTHON_CMD" -m ensurepip --default-pip || {
+        echo "ERROR: Failed to install pip in bundled Python"
+        do_rollback
+        exit 1
+    }
+fi
+
+# -------------------------------------------------------------------
+# Install Python dependencies -> ~/Library/Application Support/ClipABit/deps/
+# -------------------------------------------------------------------
+echo "Installing ClipABit dependencies..."
+DEPS_DIR="$CLIPABIT_DIR/deps"
+sudo -u "$CURRENT_USER" mkdir -p "$DEPS_DIR"
+
+# Read deps from pyproject.toml (one per line so PEP 508 markers are preserved)
+# We use a Python subprocess to parse TOML and pass values via env vars to
+# prevent shell injection. Dependencies with complex markers like
+# 'foo; python_version >= "3.11"' are preserved as single lines.
+DEPS_FILE=$(mktemp)
+trap 'rm -f "$DEPS_FILE"' EXIT
+if ! sudo -u "$CURRENT_USER" \
+    _CLIPABIT_PLUGIN_SOURCE="$PLUGIN_SOURCE" \
+    "$PYTHON_CMD" -c "
+import os, tomllib
+plugin_source = os.environ['_CLIPABIT_PLUGIN_SOURCE']
+with open(os.path.join(plugin_source, 'pyproject.toml'), 'rb') as f:
+    data = tomllib.load(f)
+deps = data.get('project', {}).get('dependencies', [])
+if not deps:
+    raise SystemExit('No dependencies listed in pyproject.toml')
+for d in deps:
+    print(d)
+" > "$DEPS_FILE"; then
+    echo "ERROR: Failed to read dependencies from pyproject.toml"
+    do_rollback
+    exit 1
+fi
+
+FAILED_DEPS=""
+while IFS= read -r dep || [ -n "$dep" ]; do
+    [ -z "$dep" ] && continue
+    echo "  Installing $dep..."
+    # --only-binary=:all: ensures we only install prebuilt wheels (no C compilation)
+    # --no-user prevents installing to ~/.local (we want isolation in deps/)
+    # --no-cache-dir saves disk space and ensures fresh downloads
+    if ! sudo -u "$CURRENT_USER" "$PYTHON_CMD" -m pip install \
+        --target "$DEPS_DIR" \
+        --only-binary=:all: \
+        --no-user \
+        --no-cache-dir \
+        "$dep" 2>&1; then
+        echo "  ERROR: Failed to install $dep"
+        FAILED_DEPS="$FAILED_DEPS $dep"
+    fi
+done < "$DEPS_FILE"
+
+if [ -n "$FAILED_DEPS" ]; then
+    echo "ERROR: Failed to install dependencies:$FAILED_DEPS"
+    do_rollback
+    exit 1
+fi
+
+chown -R "$CURRENT_USER:staff" "$DEPS_DIR"
+echo "  Dependencies installed: $DEPS_DIR"
+
+# -------------------------------------------------------------------
+# Copy plugin package -> Modules/clipabit/
+# -------------------------------------------------------------------
+echo "Installing ClipABit plugin files..."
+sudo -u "$CURRENT_USER" cp -R "${PLUGIN_SOURCE}/clipabit" "$MODULES_DIR/clipabit"
+chown -R "$CURRENT_USER:staff" "$MODULES_DIR/clipabit"
+
+# Validate
+if [ ! -f "$MODULES_DIR/clipabit/__init__.py" ]; then
+    echo "ERROR: Plugin package missing __init__.py after copy"
+    do_rollback
+    exit 1
+fi
+echo "  Package installed: $MODULES_DIR/clipabit"
+
+# -------------------------------------------------------------------
+# Write obfuscated config.dat
+# -------------------------------------------------------------------
+echo "Configuring ClipABit..."
+
+AUTH0_DOMAIN="__AUTH0_DOMAIN__"
+AUTH0_CLIENT_ID="__AUTH0_CLIENT_ID__"
+AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
+ENVIRONMENT="__ENVIRONMENT__"
+
+# We break up the sentinel strings in the check below so that 'sed' during 
+# build-pkg.sh doesn't replace them, only replacing the assignments above.
+if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0"_"DOMAIN__" ]; then
+    # Detect partial Auth0 config
+    if [ "$AUTH0_CLIENT_ID" = "__AUTH0"_"CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0"_"AUDIENCE__" ]; then
+        echo "ERROR: Auth0 config partially templated. Domain set but client_id or audience missing."
+        do_rollback
+        exit 1
+    fi
+    # Pass Auth0 values via env to avoid injection (no quotes/backslashes in Python source)
+    sudo -u "$CURRENT_USER" \
+        CLIPABIT_AUTH0_DOMAIN="$AUTH0_DOMAIN" \
+        CLIPABIT_AUTH0_CLIENT_ID="$AUTH0_CLIENT_ID" \
+        CLIPABIT_AUTH0_AUDIENCE="$AUTH0_AUDIENCE" \
+        CLIPABIT_ENVIRONMENT="$ENVIRONMENT" \
+        "$PYTHON_CMD" -c "
+import json, base64, os
+key = 'clipabit-resolve-plugin-2026'
+config = {
+    'CLIPABIT_AUTH0_DOMAIN': os.environ.get('CLIPABIT_AUTH0_DOMAIN', ''),
+    'CLIPABIT_AUTH0_CLIENT_ID': os.environ.get('CLIPABIT_AUTH0_CLIENT_ID', ''),
+    'CLIPABIT_AUTH0_AUDIENCE': os.environ.get('CLIPABIT_AUTH0_AUDIENCE', ''),
+    'CLIPABIT_ENVIRONMENT': os.environ.get('CLIPABIT_ENVIRONMENT', 'prod'),
+}
+raw = json.dumps(config).encode('utf-8')
+kb = key.encode('utf-8')
+xored = bytes(b ^ kb[i % len(kb)] for i, b in enumerate(raw))
+encoded = base64.b64encode(xored).decode('ascii')
+config_path = os.path.expanduser('~/Library/Application Support/ClipABit/config.dat')
+os.makedirs(os.path.dirname(config_path), exist_ok=True)
+with open(config_path, 'w') as f:
+    f.write(encoded)
+print('  Config written: ' + config_path)
+"
+else
+    echo "  WARNING: Auth0 configuration was not provided at build time."
+    echo "  The installer will skip creating config.dat, so the plugin will not have"
+    echo "  authentication credentials. Please set CLIPABIT_AUTH0_* environment"
+    echo "  variables before building the installer."
+fi
+
+# -------------------------------------------------------------------
+# Generate and install bootstrap shim (LAST — so partial installs
+# don't show a broken entry in Resolve's Scripts menu)
+# -------------------------------------------------------------------
+# CRITICAL: We write the shim LAST in the install process. This ensures that
+# if any earlier step fails (Python, deps, plugin files), Resolve won't show
+# a broken "ClipABit" menu entry. The shim is the user-facing entry point,
+# so it should only exist when the full installation is complete.
+echo "Finalizing ClipABit installation..."
+
 SHIM_TARGET="$SCRIPTS_UTILITY/ClipABit.py"
 
 sudo -u "$CURRENT_USER" \
@@ -121,11 +379,13 @@ def _clipabit_bootstrap():
                 os.environ.setdefault(k, str(v))
         except Exception:
             pass
-    try:
-        _sd = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        _sd = os.getcwd()
-    _deps = os.path.abspath(os.path.join(_sd, \"..\", \"..\", \"Modules\", \"clipabit_deps\"))
+    _deps_locations = {
+        \"darwin\": os.path.expanduser(
+            \"~/Library/Application Support/ClipABit/deps\"),
+        \"win32\": os.path.join(
+            os.environ.get(\"LOCALAPPDATA\", \"\"), \"ClipABit\", \"deps\"),
+    }
+    _deps = _deps_locations.get(sys.platform, \"\")
     if os.path.isdir(_deps) and _deps not in sys.path:
         sys.path.insert(0, _deps)
 _clipabit_bootstrap()
@@ -137,119 +397,37 @@ del _clipabit_bootstrap
 original = open(os.path.join(plugin_source, 'clipabit.py'), 'r').read()
 shim = preamble + original
 
-# Validate syntax before writing
+# Validate syntax before writing to catch any template/merge errors.
+# We don't want to write a broken Python file that would crash when Resolve
+# tries to load it from the Scripts menu.
 compile(shim, 'ClipABit.py', 'exec')
 
 with open(shim_target, 'w') as f:
     f.write(shim)
 "
 
+if [ $? -ne 0 ]; then
+    echo "ERROR: Failed to generate bootstrap shim"
+    do_rollback
+    exit 1
+fi
+
 chmod 755 "$SHIM_TARGET"
 chown "$CURRENT_USER:staff" "$SHIM_TARGET"
 echo "  Shim installed: $SHIM_TARGET"
 
 # -------------------------------------------------------------------
-# Copy plugin package -> Modules/clipabit/
+# Cleanup backups (success)
 # -------------------------------------------------------------------
-echo "Installing plugin package..."
-rm -rf "$MODULES_DIR/clipabit"
-sudo -u "$CURRENT_USER" cp -R "${PLUGIN_SOURCE}/clipabit" "$MODULES_DIR/clipabit"
-chown -R "$CURRENT_USER:staff" "$MODULES_DIR/clipabit"
-echo "  Package installed: $MODULES_DIR/clipabit"
-
-# -------------------------------------------------------------------
-# Install Python dependencies -> Modules/clipabit_deps/
-# -------------------------------------------------------------------
-echo "Installing Python dependencies..."
-DEPS_DIR="$MODULES_DIR/clipabit_deps"
-sudo -u "$CURRENT_USER" rm -rf "$DEPS_DIR"
-sudo -u "$CURRENT_USER" mkdir -p "$DEPS_DIR"
-
-# Read deps from pyproject.toml (one per line so PEP 508 markers are preserved)
-DEPS_FILE=$(mktemp)
-trap 'rm -f "$DEPS_FILE"' EXIT
-if ! sudo -u "$CURRENT_USER" \
-    _CLIPABIT_PLUGIN_SOURCE="$PLUGIN_SOURCE" \
-    "$PYTHON_CMD" -c "
-import os, tomllib
-plugin_source = os.environ['_CLIPABIT_PLUGIN_SOURCE']
-with open(os.path.join(plugin_source, 'pyproject.toml'), 'rb') as f:
-    data = tomllib.load(f)
-deps = data.get('project', {}).get('dependencies', [])
-if not deps:
-    raise SystemExit('No dependencies listed in pyproject.toml')
-for d in deps:
-    print(d)
-" > "$DEPS_FILE"; then
-    echo "ERROR: Failed to read dependencies from pyproject.toml"
-    exit 1
-fi
-
-FAILED_DEPS=""
-while IFS= read -r dep || [ -n "$dep" ]; do
-    [ -z "$dep" ] && continue
-    echo "  Installing $dep..."
-    if ! sudo -u "$CURRENT_USER" "$PYTHON_CMD" -m pip install \
-        --target "$DEPS_DIR" \
-        --no-user \
-        --no-cache-dir \
-        "$dep" 2>&1; then
-        echo "  ERROR: Failed to install $dep"
-        FAILED_DEPS="$FAILED_DEPS $dep"
-    fi
-done < "$DEPS_FILE"
-
-if [ -n "$FAILED_DEPS" ]; then
-    echo "ERROR: Failed to install dependencies:$FAILED_DEPS"
-    exit 1
-fi
-
-chown -R "$CURRENT_USER:staff" "$DEPS_DIR"
-echo "  Dependencies installed: $DEPS_DIR"
-
-# -------------------------------------------------------------------
-# Write obfuscated config.dat
-# -------------------------------------------------------------------
-AUTH0_DOMAIN="__AUTH0_DOMAIN__"
-AUTH0_CLIENT_ID="__AUTH0_CLIENT_ID__"
-AUTH0_AUDIENCE="__AUTH0_AUDIENCE__"
-ENVIRONMENT="__ENVIRONMENT__"
-
-if [ "$AUTH0_DOMAIN" != "" ] && [ "$AUTH0_DOMAIN" != "__AUTH0_DOMAIN__" ]; then
-    if [ "$AUTH0_CLIENT_ID" = "__AUTH0_CLIENT_ID__" ] || [ "$AUTH0_AUDIENCE" = "__AUTH0_AUDIENCE__" ]; then
-        echo "ERROR: Auth0 config partially templated. Domain set but client_id or audience missing."
-        exit 1
-    fi
-
-    echo "Writing config.dat..."
-    # Pass Auth0 values via env to avoid injection (no quotes/backslashes in Python source)
-    sudo -u "$CURRENT_USER" \
-        CLIPABIT_AUTH0_DOMAIN="$AUTH0_DOMAIN" \
-        CLIPABIT_AUTH0_CLIENT_ID="$AUTH0_CLIENT_ID" \
-        CLIPABIT_AUTH0_AUDIENCE="$AUTH0_AUDIENCE" \
-        CLIPABIT_ENVIRONMENT="$ENVIRONMENT" \
-        "$PYTHON_CMD" -c "
-import json, base64, os
-key = 'clipabit-resolve-plugin-2026'
-config = {
-    'CLIPABIT_AUTH0_DOMAIN': os.environ.get('CLIPABIT_AUTH0_DOMAIN', ''),
-    'CLIPABIT_AUTH0_CLIENT_ID': os.environ.get('CLIPABIT_AUTH0_CLIENT_ID', ''),
-    'CLIPABIT_AUTH0_AUDIENCE': os.environ.get('CLIPABIT_AUTH0_AUDIENCE', ''),
-    'CLIPABIT_ENVIRONMENT': os.environ.get('CLIPABIT_ENVIRONMENT', 'prod'),
-}
-raw = json.dumps(config).encode('utf-8')
-kb = key.encode('utf-8')
-xored = bytes(b ^ kb[i % len(kb)] for i, b in enumerate(raw))
-encoded = base64.b64encode(xored).decode('ascii')
-config_path = os.path.expanduser('~/Library/Application Support/ClipABit/config.dat')
-os.makedirs(os.path.dirname(config_path), exist_ok=True)
-with open(config_path, 'w') as f:
-    f.write(encoded)
-print('  Config written: ' + config_path)
-"
-else
-    echo "  Auth0 values not baked in. Skipping config.dat."
-fi
+# Install succeeded! Remove all .bak files. If we reached this point, the
+# new installation is complete and verified, so the old backups are no longer
+# needed. This completes the atomic install pattern: backup → install → cleanup.
+echo "Cleaning up backups..."
+rm -f "$SCRIPTS_UTILITY/ClipABit.py.bak"
+rm -rf "$MODULES_DIR/clipabit.bak"
+rm -rf "$CLIPABIT_DIR/python.bak"
+rm -rf "$CLIPABIT_DIR/deps.bak"
+rm -f "$CONFIG_DIR/config.dat.bak"
 
 # -------------------------------------------------------------------
 # Cleanup staging
@@ -258,11 +436,39 @@ echo "Cleaning up staging directory..."
 rm -rf "$STAGING_DIR" 2>/dev/null || true
 
 echo ""
-echo "  ClipABit plugin installed successfully!"
-echo "  Shim:    $SHIM_TARGET"
-echo "  Package: $MODULES_DIR/clipabit"
-echo "  Deps:    $DEPS_DIR"
-echo "  Config:  $CONFIG_DIR/config.dat"
+echo "=========================================="
+echo "  ClipABit Installation Complete!"
+echo "=========================================="
 echo ""
+echo "  ClipABit has been installed successfully."
+echo ""
+
+if [ "$RESOLVE_WAS_RUNNING" -eq 1 ]; then
+    echo "  ⚠️  DaVinci Resolve was running during installation."
+    echo "  ⚠️  You MUST restart DaVinci Resolve for ClipABit to work properly."
+    echo ""
+fi
+
+echo "  To access ClipABit in DaVinci Resolve:"
+echo "    1. Open DaVinci Resolve"
+echo "    2. Go to Workspace > Scripts > ClipABit"
+echo ""
+echo "  Installation Details:"
+echo "    Shim:    $SHIM_TARGET"
+echo "    Package: $MODULES_DIR/clipabit"
+echo "    Python:  $CLIPABIT_DIR/python"
+echo "    Deps:    $DEPS_DIR"
+echo "    Config:  $CONFIG_DIR/config.dat"
+echo "    Log:     $LOG_FILE"
+echo ""
+
+# Log installed file listing for post-mortem debugging
+echo "--- Installed files snapshot ---" >&3
+ls -la "$CLIPABIT_DIR/" >&3 2>&1 || true
+ls -la "$CLIPABIT_DIR/python/bin/" >&3 2>&1 || true
+ls -la "$CLIPABIT_DIR/deps/" >&3 2>&1 || true
+ls -la "$MODULES_DIR/clipabit/" >&3 2>&1 || true
+ls -la "$SHIM_TARGET" >&3 2>&1 || true
+echo "--- End installed files snapshot ---" >&3
 
 exit 0
