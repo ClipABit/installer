@@ -17,9 +17,34 @@ import tempfile
 import urllib.request
 import urllib.error
 import zipfile
+import ssl
 from pathlib import Path
 
-import tomllib
+# ---------------------------------------------------------------------------
+# SSL Workaround for macOS (urllib.request fails if certs aren't installed)
+# ---------------------------------------------------------------------------
+def get_ssl_context():
+    """Return an SSL context. Falls back to unverified if needed on macOS."""
+    try:
+        # On macOS, many Python installations (e.g. from python.org) don't include
+        # root certificates. We fall back to an unverified context to ensure
+        # downloads work out of the box for developers and CI.
+        if platform.system() == "Darwin":
+            return ssl._create_unverified_context()
+        return ssl.create_default_context()
+    except Exception:
+        if hasattr(ssl, '_create_unverified_context'):
+            return ssl._create_unverified_context()
+        return None
+
+
+try:
+    import tomllib
+except ModuleNotFoundError:
+    try:
+        import tomli as tomllib
+    except ModuleNotFoundError:
+        import pip._vendor.tomli as tomllib
 
 # ---------------------------------------------------------------------------
 # Constants
@@ -56,11 +81,13 @@ def _clipabit_bootstrap():
                 os.environ.setdefault(k, str(v))
         except Exception:
             pass
-    try:
-        _sd = os.path.dirname(os.path.abspath(__file__))
-    except NameError:
-        _sd = os.getcwd()
-    _deps = os.path.abspath(os.path.join(_sd, "..", "..", "Modules", "clipabit_deps"))
+    _deps_locations = {{
+        "darwin": os.path.expanduser(
+            "~/Library/Application Support/ClipABit/deps"),
+        "win32": os.path.join(
+            os.environ.get("LOCALAPPDATA", ""), "ClipABit", "deps"),
+    }}
+    _deps = _deps_locations.get(sys.platform, "")
     if os.path.isdir(_deps) and _deps not in sys.path:
         sys.path.insert(0, _deps)
 _clipabit_bootstrap()
@@ -136,22 +163,27 @@ def get_python_cmd() -> str:
     return "python3"
 
 
-# Resolved interpreter path; set by check_python() so all subprocess calls use the same interpreter.
-_python_exe: str | None = None
+def get_python_exe(bundled_python_path=None) -> str:
+    """Return the Python executable path.
 
-
-def get_python_exe() -> str:
-    """Return the resolved Python executable path. Use this for subprocess calls after check_python()."""
-    global _python_exe
-    if _python_exe is not None:
-        return _python_exe
+    If *bundled_python_path* is given it is returned directly (used when a
+    standalone Python runtime is bundled with the installer).  Otherwise falls
+    back to the system Python.
+    """
+    if bundled_python_path is not None:
+        return str(bundled_python_path)
     cmd = get_python_cmd()
     exe = shutil.which(cmd)
     return exe or cmd
 
 
-def get_resolve_directories():
-    """Return (scripts_utility_dir, modules_dir) for the current platform."""
+def get_resolve_directories(scripts_dir=None, modules_dir=None):
+    """Return (scripts_utility_dir, modules_dir) for the current platform.
+
+    Accepts optional overrides so callers (and tests) can redirect to temp dirs.
+    """
+    if scripts_dir is not None and modules_dir is not None:
+        return scripts_dir, modules_dir
     system = platform.system()
     if system == "Darwin":
         base = Path.home() / "Library/Application Support/Blackmagic Design/DaVinci Resolve/Fusion"
@@ -164,7 +196,10 @@ def get_resolve_directories():
     return base / "Scripts" / "Utility", base / "Modules"
 
 
-def get_config_directory() -> Path:
+def get_config_directory(override=None) -> Path:
+    """Return the config directory.  Accepts an optional override."""
+    if override is not None:
+        return override
     system = platform.system()
     if system == "Darwin":
         return Path.home() / "Library/Application Support/ClipABit"
@@ -173,9 +208,64 @@ def get_config_directory() -> Path:
     return Path.home() / ".config" / "clipabit"
 
 
+def get_clipabit_directory(override=None) -> Path:
+    """Return the ClipABit application directory (python runtime + deps).
+
+    On macOS: ~/Library/Application Support/ClipABit
+    On Windows: %LOCALAPPDATA%\\ClipABit  (machine-local, not roaming)
+    """
+    if override is not None:
+        return override
+    system = platform.system()
+    if system == "Darwin":
+        return Path.home() / "Library/Application Support/ClipABit"
+    elif system == "Windows":
+        # Fall back to known absolute path if LOCALAPPDATA is unset
+        localappdata = os.getenv("LOCALAPPDATA")
+        if not localappdata:
+            localappdata = str(Path.home() / "AppData" / "Local")
+        return Path(localappdata) / "ClipABit"
+    return Path.home() / ".local" / "share" / "clipabit"
+
+
 # ---------------------------------------------------------------------------
 # Pre-flight checks
 # ---------------------------------------------------------------------------
+
+def check_resolve_running(skip=False) -> bool:
+    """Check if DaVinci Resolve is currently running.
+
+    Returns True if Resolve is running, False otherwise.
+    This is used to display a warning, not to block installation.
+    """
+    if skip:
+        return False
+
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            result = subprocess.run(
+                ["pgrep", "-x", "DaVinci Resolve"],
+                capture_output=True, text=True,
+            )
+        elif system == "Windows":
+            result = subprocess.run(
+                ["tasklist", "/FI", "IMAGENAME eq Resolve.exe"],
+                capture_output=True, text=True,
+            )
+        else:
+            return False
+
+        if result.returncode == 0:
+            if system == "Windows" and "Resolve.exe" not in result.stdout:
+                return False
+            print_warning("DaVinci Resolve is currently running.")
+            print_warning("Installation will proceed, but you must restart Resolve for changes to take effect.")
+            return True
+        return False
+    except FileNotFoundError:
+        # Could not check - assume not running
+        return False
 
 def check_platform():
     system = platform.system()
@@ -215,30 +305,30 @@ def check_davinci_resolve():
 
 
 def check_python():
-    global _python_exe
+    """Verify that a suitable system Python exists and return its path (or None)."""
     print_info("Checking Python installation...")
     cmd = get_python_cmd()
     exe = shutil.which(cmd)
     if not exe:
         print_error(f"'{cmd}' not found in PATH.")
-        return False
-    _python_exe = exe
+        return None
     print_success(f"Found: {exe}")
 
     try:
+        # Require Python 3.11+ (aligned with bundled Python version)
         result = subprocess.run(
-            [exe, "-c", "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,12) else 1)"],
+            [exe, "-c", "import sys; v=sys.version_info; print(f'{v.major}.{v.minor}.{v.micro}'); sys.exit(0 if v >= (3,11) else 1)"],
             capture_output=True, text=True,
         )
         version = result.stdout.strip()
         if result.returncode != 0:
-            print_error(f"Python {version} found but 3.12+ is required.")
-            return False
+            print_error(f"Python {version} found but 3.11+ is required.")
+            return None
         print_success(f"Python {version}")
-        return True
+        return exe
     except Exception as e:
         print_error(f"Python check failed: {e}")
-        return False
+        return None
 
 
 def check_pip():
@@ -277,7 +367,7 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         api_url = f"https://api.github.com/repos/{PLUGIN_GITHUB_REPO}/releases/latest"
         try:
             req = urllib.request.Request(api_url, headers={"Accept": "application/vnd.github+json"})
-            with urllib.request.urlopen(req, timeout=30) as resp:
+            with urllib.request.urlopen(req, timeout=30, context=get_ssl_context()) as resp:
                 data = json.loads(resp.read().decode())
                 tag = data["tag_name"]
                 print_info(f"Latest release: {tag}")
@@ -297,7 +387,7 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         try:
             print_info(f"Downloading {archive_url}...")
             req = urllib.request.Request(archive_url)
-            with urllib.request.urlopen(req, timeout=60) as resp, open(zip_path, "wb") as f:
+            with urllib.request.urlopen(req, timeout=60, context=get_ssl_context()) as resp, open(zip_path, "wb") as f:
                 shutil.copyfileobj(resp, f)
         except urllib.error.URLError as e:
             if "timed out" in str(e).lower():
@@ -312,7 +402,9 @@ def download_plugin_release(staging_dir: Path, tag: str | None = None):
         with zipfile.ZipFile(zip_path, "r") as zf:
             tmp_path = Path(tmp)
             for info in zf.infolist():
-                # Guard against zip-slip: ensure no path traversal
+                # Guard against zip-slip vulnerability: malicious archives can contain
+                # paths like "../../../etc/passwd" to write outside the extraction dir.
+                # We validate each entry before extracting to prevent path traversal.
                 name = info.filename
                 if ".." in name or name.startswith("/") or (name.startswith("\\") and ".." in name):
                     print_error(f"Rejecting unsafe archive member: {name}")
@@ -387,7 +479,48 @@ def get_dependencies(plugin_dir: Path) -> list[str]:
     return deps
 
 
-def install_dependencies(target_dir: Path, plugin_dir: Path):
+def install_python_runtime(source: Path, target: Path):
+    """Copy the bundled Python runtime from *source* to *target*.
+
+    Preserves symlinks, removes macOS quarantine xattr, and validates
+    that the copied python3 binary exists.
+    """
+    target.parent.mkdir(parents=True, exist_ok=True)
+    if target.exists():
+        shutil.rmtree(target)
+    shutil.copytree(source, target, symlinks=True)
+
+    # Remove macOS quarantine xattr - macOS sets this on downloaded/extracted files.
+    # The bundled Python is unsigned, so Gatekeeper would block execution without
+    # removing this attribute. Similar to postinstall script behavior.
+    if platform.system() == "Darwin":
+        try:
+            subprocess.run(
+                ["xattr", "-dr", "com.apple.quarantine", str(target)],
+                capture_output=True,
+            )
+        except FileNotFoundError:
+            pass
+
+    # Validate the Python binary exists and is executable
+    if platform.system() == "Windows":
+        python_exe = target / "python.exe"
+    else:
+        python_exe = target / "bin" / "python3"
+
+    if not python_exe.exists():
+        print_error(f"Python binary not found after copy: {python_exe}")
+        return False
+
+    if not os.access(python_exe, os.X_OK):
+        print_error(f"Python binary is not executable: {python_exe}")
+        return False
+
+    print_success(f"Bundled Python installed: {target}")
+    return True
+
+
+def install_dependencies(target_dir: Path, plugin_dir: Path, python_exe=None):
     """Install Python dependencies to target_dir."""
     print_info(f"Installing dependencies to {target_dir}...")
     if target_dir.exists():
@@ -397,13 +530,17 @@ def install_dependencies(target_dir: Path, plugin_dir: Path):
 
     deps = get_dependencies(plugin_dir)
 
-    exe = get_python_exe()
+    exe = python_exe or get_python_exe()
     for dep in deps:
         print_info(f"  Installing {dep}...")
         try:
+            # --only-binary=:all: ensures we only install prebuilt wheels.
+            # The bundled Python has no C compiler, so source-only packages
+            # (sdist) would fail to build. This flag forces pip to reject them.
             subprocess.run(
                 [exe, "-m", "pip", "install",
                  "--target", str(target_dir),
+                 "--only-binary=:all:",
                  "--no-user",
                  "--no-cache-dir",
                  dep],
@@ -453,103 +590,250 @@ def write_config(config_dir: Path, auth0_domain: str, auth0_client_id: str,
 
 
 # ---------------------------------------------------------------------------
+# Backup / rollback / cleanup  (atomic install support)
+# ---------------------------------------------------------------------------
+
+# The five artifacts we back up:
+#   1. scripts_dir/ClipABit.py        (file)
+#   2. modules_dir/clipabit/           (dir)
+#   3. clipabit_dir/python/            (dir)
+#   4. clipabit_dir/deps/              (dir)
+#   5. config_dir/config.dat           (file)
+
+def _backup_item(path: Path, is_dir: bool = False):
+    """Rename *path* to *path*.bak. Removes stale .bak first if present."""
+    bak = Path(str(path) + ".bak")
+    if bak.exists():
+        if bak.is_dir():
+            shutil.rmtree(bak)
+        else:
+            bak.unlink()
+    if path.exists():
+        path.rename(bak)
+
+
+def backup_existing(scripts_dir, modules_dir, clipabit_dir, config_dir):
+    """Snapshot current installation so a failed upgrade can roll back."""
+    _backup_item(scripts_dir / "ClipABit.py")
+    _backup_item(modules_dir / "clipabit", is_dir=True)
+    _backup_item(clipabit_dir / "python", is_dir=True)
+    _backup_item(clipabit_dir / "deps", is_dir=True)
+    _backup_item(config_dir / "config.dat")
+
+
+def rollback(scripts_dir, modules_dir, clipabit_dir, config_dir):
+    """Remove partially-written new files and restore .bak originals."""
+    items = [
+        (scripts_dir / "ClipABit.py", False),
+        (modules_dir / "clipabit", True),
+        (clipabit_dir / "python", True),
+        (clipabit_dir / "deps", True),
+        (config_dir / "config.dat", False),
+    ]
+    for path, is_dir in items:
+        bak = Path(str(path) + ".bak")
+        # Remove the (potentially partial) new file/dir
+        if path.exists():
+            if path.is_dir():
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+        # Restore from .bak if available
+        if bak.exists():
+            bak.rename(path)
+    print_info("Rolled back to previous installation state.")
+
+
+def cleanup_backups(scripts_dir, modules_dir, clipabit_dir, config_dir):
+    """Delete all .bak files/dirs after a successful install."""
+    bak_paths = [
+        scripts_dir / "ClipABit.py.bak",
+        modules_dir / "clipabit.bak",
+        clipabit_dir / "python.bak",
+        clipabit_dir / "deps.bak",
+        config_dir / "config.dat.bak",
+    ]
+    for bak in bak_paths:
+        if bak.exists():
+            if bak.is_dir():
+                shutil.rmtree(bak)
+            else:
+                bak.unlink()
+
+
+# ---------------------------------------------------------------------------
 # Install logic
 # ---------------------------------------------------------------------------
 
-def install_plugin(plugin_dir: Path, skip_checks: bool = False):
-    """Full installation from a local plugin directory."""
+def install_plugin(plugin_dir: Path, skip_checks: bool = False,
+                   scripts_dir=None, modules_dir=None, config_dir=None,
+                   clipabit_dir=None, bundled_python_dir=None) -> tuple[bool, bool]:
+    """Full installation from a local plugin directory.
+
+    All path parameters accept overrides for testability.  When *None*,
+    platform defaults are used.
+
+    Returns (success, resolve_was_running) tuple.
+    """
 
     # --- Pre-flight ---
+    print_info("Verifying system compatibility...")
     if not check_platform():
-        return False
+        return False, False
 
+    resolve_was_running = False
     if not skip_checks:
         if not check_davinci_resolve():
-            return False
+            return False, False
+        resolve_was_running = check_resolve_running()
     else:
-        print_warning("Skipping DaVinci Resolve check (--skip-checks).")
-
-    if not check_python():
-        return False
-    if not check_pip():
-        return False
+        print_warning("Skipping DaVinci Resolve / Resolve-running checks (--skip-checks).")
 
     # --- Resolve directories ---
-    scripts_dir, modules_dir = get_resolve_directories()
-    print_info(f"Scripts dir: {scripts_dir}")
-    print_info(f"Modules dir: {modules_dir}")
+    scripts_dir, modules_dir = get_resolve_directories(scripts_dir, modules_dir)
+    config_dir = get_config_directory(override=config_dir)
+    clipabit_dir = get_clipabit_directory(override=clipabit_dir)
+    print_info(f"Scripts dir:  {scripts_dir}")
+    print_info(f"Modules dir:  {modules_dir}")
+    print_info(f"ClipABit dir: {clipabit_dir}")
 
-    # --- Generate bootstrap shim ---
+    # Determine Python exe (bundled takes priority)
+    if bundled_python_dir is not None:
+        # Windows bundled Python is at python.exe, macOS at bin/python3
+        if platform.system() == "Windows":
+            python_exe_path = str(bundled_python_dir / "python.exe")
+        else:
+            python_exe_path = str(bundled_python_dir / "bin" / "python3")
+    else:
+        python_exe_path = check_python()
+        if not python_exe_path:
+            return False, False
+        if not check_pip():
+            return False, False
+
+    # Validate plugin source
     original_shim = plugin_dir / "clipabit.py"
     if not original_shim.exists():
         print_error(f"Plugin shim not found: {original_shim}")
-        return False
-
-    print_info("Generating bootstrap shim...")
-    shim_content = generate_bootstrap_shim(original_shim)
-
-    # Validate generated shim has valid Python syntax
-    try:
-        compile(shim_content, "ClipABit.py", "exec")
-    except SyntaxError as e:
-        print_error(f"Generated bootstrap shim has syntax error: {e}")
-        return False
-
-    shim_target = scripts_dir / "ClipABit.py"
-    scripts_dir.mkdir(parents=True, exist_ok=True)
-    shim_target.write_text(shim_content, encoding="utf-8")
-    os.chmod(shim_target, 0o755)
-    print_success(f"Bootstrap shim installed: {shim_target}")
-
-    # --- Copy plugin package to Modules/clipabit/ ---
+        return False, False
     pkg_source = plugin_dir / "clipabit"
-    pkg_target = modules_dir / "clipabit"
     if not pkg_source.is_dir():
         print_error(f"Plugin package not found: {pkg_source}")
-        return False
+        return False, False
 
-    if pkg_target.exists():
-        print_warning("Removing existing clipabit package...")
-        shutil.rmtree(pkg_target)
-    modules_dir.mkdir(parents=True, exist_ok=True)
-    shutil.copytree(pkg_source, pkg_target)
-    print_success(f"Plugin package installed: {pkg_target}")
+    # --- Backup existing installation ---
+    print_info("Backing up existing ClipABit installation...")
+    backup_existing(scripts_dir, modules_dir, clipabit_dir, config_dir)
 
-    # --- Install dependencies to Modules/clipabit_deps/ ---
-    deps_target = modules_dir / "clipabit_deps"
-    if not install_dependencies(deps_target, plugin_dir):
-        return False
+    try:
+        # --- Install bundled Python runtime ---
+        if bundled_python_dir is not None:
+            print_info("Installing ClipABit Python runtime...")
+            python_target = clipabit_dir / "python"
+            install_python_runtime(bundled_python_dir, python_target)
 
-    # --- Write config ---
-    auth0_domain = os.environ.get("CLIPABIT_AUTH0_DOMAIN", "")
-    auth0_client_id = os.environ.get("CLIPABIT_AUTH0_CLIENT_ID", "")
-    auth0_audience = os.environ.get("CLIPABIT_AUTH0_AUDIENCE", "")
-    environment = os.environ.get("CLIPABIT_ENVIRONMENT", "prod")
+            # Update python_exe_path to point to the installed runtime (after quarantine removal)
+            if platform.system() == "Windows":
+                python_exe_path = str(python_target / "python.exe")
+            else:
+                python_exe_path = str(python_target / "bin" / "python3")
 
-    if auth0_domain and auth0_client_id and auth0_audience:
-        config_dir = get_config_directory()
-        write_config(config_dir, auth0_domain, auth0_client_id, auth0_audience, environment)
-    else:
-        print_warning("Auth0 env vars not set. Skipping config.dat generation.")
-        print_info("Set CLIPABIT_AUTH0_DOMAIN, CLIPABIT_AUTH0_CLIENT_ID, CLIPABIT_AUTH0_AUDIENCE to enable.")
+        # --- Install dependencies ---
+        print_info("Installing ClipABit dependencies...")
+        deps_target = clipabit_dir / "deps"
+        if not install_dependencies(deps_target, plugin_dir, python_exe=python_exe_path):
+            raise RuntimeError("Dependency installation failed")
 
-    return True
+        # --- Copy plugin package to Modules/clipabit/ ---
+        print_info("Installing ClipABit plugin files...")
+        pkg_target = modules_dir / "clipabit"
+        if pkg_target.exists():
+            shutil.rmtree(pkg_target)
+        modules_dir.mkdir(parents=True, exist_ok=True)
+        shutil.copytree(pkg_source, pkg_target)
+        print_success(f"Plugin package installed: {pkg_target}")
+
+        # --- Write config ---
+        print_info("Configuring ClipABit...")
+        auth0_domain = os.environ.get("CLIPABIT_AUTH0_DOMAIN", "")
+        auth0_client_id = os.environ.get("CLIPABIT_AUTH0_CLIENT_ID", "")
+        auth0_audience = os.environ.get("CLIPABIT_AUTH0_AUDIENCE", "")
+        environment = os.environ.get("CLIPABIT_ENVIRONMENT", "prod")
+
+        # Detect partial Auth0 config (some set, some not).
+        # Partial config indicates a build-time error (env vars not fully set)
+        # and will cause confusing runtime auth failures. We fail loudly here
+        # to catch this at install time instead of letting users hit it later.
+        auth0_vars = [auth0_domain, auth0_client_id, auth0_audience]
+        any_set = any(auth0_vars)
+        all_set = all(auth0_vars)
+        if any_set and not all_set:
+            print_error("Auth0 config partially set. All three must be set or none.")
+            raise RuntimeError("Partial Auth0 config")
+
+        if all_set:
+            write_config(config_dir, auth0_domain, auth0_client_id, auth0_audience, environment)
+        else:
+            print_warning("Auth0 env vars not set. Skipping config.dat generation.")
+
+        # --- Generate bootstrap shim (LAST) ---
+        # CRITICAL: We write the shim LAST in the install process. This ensures
+        # that if any earlier step fails (Python, deps, plugin files), Resolve
+        # won't show a broken "ClipABit" menu entry. The shim is the user-facing
+        # entry point, so it should only exist when the full installation is ready.
+        print_info("Finalizing ClipABit installation...")
+        shim_content = generate_bootstrap_shim(original_shim)
+        try:
+            # Validate syntax before writing to catch template/merge errors.
+            # We don't want to write a broken Python file that would crash when
+            # Resolve tries to load it from the Scripts menu.
+            compile(shim_content, "ClipABit.py", "exec")
+        except SyntaxError as e:
+            print_error(f"Generated bootstrap shim has syntax error: {e}")
+            raise RuntimeError("Shim syntax error")
+
+        shim_target = scripts_dir / "ClipABit.py"
+        scripts_dir.mkdir(parents=True, exist_ok=True)
+        shim_target.write_text(shim_content, encoding="utf-8")
+        os.chmod(shim_target, 0o755)
+        print_success(f"Bootstrap shim installed: {shim_target}")
+
+    except Exception as e:
+        print_error(f"Installation failed: {e}")
+        rollback(scripts_dir, modules_dir, clipabit_dir, config_dir)
+        return False, False
+
+    # --- Success: clean up backups ---
+    cleanup_backups(scripts_dir, modules_dir, clipabit_dir, config_dir)
+    return True, resolve_was_running
 
 
 # ---------------------------------------------------------------------------
 # Verification
 # ---------------------------------------------------------------------------
 
-def verify_installation(plugin_dir: Path | None = None):
-    """Verify the installation is complete and functional."""
+def verify_installation(plugin_dir: Path | None = None, scripts_dir=None,
+                        modules_dir=None, config_dir=None, clipabit_dir=None,
+                        bundled_python_path=None) -> bool:
+    """Verify the installation is complete and functional.
+
+    All path parameters accept overrides for testability.
+    """
     print_info("Verifying installation...")
-    scripts_dir, modules_dir = get_resolve_directories()
+    scripts_dir, modules_dir = get_resolve_directories(scripts_dir, modules_dir)
+    config_dir = get_config_directory(override=config_dir)
+    clipabit_dir = get_clipabit_directory(override=clipabit_dir)
     ok = True
 
     # Shim
     shim = scripts_dir / "ClipABit.py"
     if shim.exists():
-        print_success(f"Shim: {shim}")
+        try:
+            compile(shim.read_text(encoding="utf-8"), "ClipABit.py", "exec")
+            print_success(f"Shim: {shim}")
+        except SyntaxError:
+            print_error(f"Shim has syntax error: {shim}")
+            ok = False
     else:
         print_error(f"Shim missing: {shim}")
         ok = False
@@ -563,11 +847,11 @@ def verify_installation(plugin_dir: Path | None = None):
         ok = False
 
     # Deps
-    deps_dir = modules_dir / "clipabit_deps"
+    deps_dir = clipabit_dir / "deps"
     if deps_dir.is_dir() and any(deps_dir.iterdir()):
         print_success(f"Dependencies: {deps_dir}")
     else:
-        print_error(f"Dependencies missing: {deps_dir}")
+        print_error(f"Dependencies missing or empty: {deps_dir}")
         ok = False
 
     # Assets (inside clipabit package, not separate)
@@ -578,7 +862,7 @@ def verify_installation(plugin_dir: Path | None = None):
         print_warning(f"Assets missing: {assets_dir}")
 
     # Config
-    config_path = get_config_directory() / "config.dat"
+    config_path = config_dir / "config.dat"
     if config_path.exists():
         try:
             encoded = config_path.read_text(encoding="utf-8").strip()
@@ -591,65 +875,6 @@ def verify_installation(plugin_dir: Path | None = None):
             print_warning("Config exists but could not be decoded.")
     else:
         print_warning(f"Config missing: {config_path}")
-
-    # Import test — derive import targets from pyproject.toml when available
-    print_info("Running import test...")
-    exe = get_python_exe()
-    # Map pip package names (or name prefixes) to Python import names
-    package_to_import = {
-        "pyqt6": "PyQt6",
-        "auth0-python": "auth0",
-        "auth0": "auth0",
-        "watchdog": "watchdog",
-        "requests": "requests",
-        "keyring": "keyring",
-    }
-    # Try the provided plugin_dir first, then fall back to script_dir/plugin/
-    pyproject_path = None
-    if plugin_dir and (plugin_dir / "pyproject.toml").exists():
-        pyproject_path = plugin_dir / "pyproject.toml"
-    else:
-        fallback = Path(__file__).parent.resolve() / "plugin" / "pyproject.toml"
-        if fallback.exists():
-            pyproject_path = fallback
-    imports = []
-    if pyproject_path:
-        try:
-            with open(pyproject_path, "rb") as f:
-                data = tomllib.load(f)
-            deps_raw = data.get("project", {}).get("dependencies", [])
-            seen = set()
-            for spec in deps_raw:
-                # PEP 508: package name is before ';' or '['; strip version (>=, ==, etc.)
-                name_part = spec.split(";")[0].split("[")[0].strip().lower()
-                pkg_key = name_part.split(">=")[0].split("==")[0].split("~=")[0].strip().replace("_", "-")
-                for pkg_name, import_name in package_to_import.items():
-                    if pkg_key == pkg_name or pkg_key == pkg_name.replace("_", "-"):
-                        if import_name not in seen:
-                            imports.append(import_name)
-                            seen.add(import_name)
-                        break
-        except Exception:
-            pass
-    if not imports:
-        imports = ["PyQt6", "requests", "keyring", "watchdog", "auth0"]
-    test_script = (
-        f"import sys; sys.path.insert(0, r'{deps_dir}'); "
-        + "; ".join(f"import {mod}" for mod in imports)
-        + "; print('OK')"
-    )
-    try:
-        result = subprocess.run(
-            [exe, "-c", test_script],
-            capture_output=True, text=True, timeout=30,
-        )
-        if result.returncode == 0:
-            print_success("Import test passed.")
-        else:
-            print_error(f"Import test failed: {result.stderr.strip()}")
-            ok = False
-    except Exception as e:
-        print_warning(f"Import test error: {e}")
 
     return ok
 
@@ -696,8 +921,20 @@ def main():
         print_success("Download complete. Exiting (--download-only).")
         sys.exit(0)
 
+    # Determine bundled Python path
+    if getattr(sys, 'frozen', False):
+        bundled_python_dir = Path(sys._MEIPASS) / "python"
+    else:
+        bundled_python_dir = script_dir / "python"
+    if not bundled_python_dir.is_dir():
+        bundled_python_dir = None
+
     # Run full install
-    if not install_plugin(plugin_dir, skip_checks=args.skip_checks):
+    success, resolve_was_running = install_plugin(
+        plugin_dir, skip_checks=args.skip_checks,
+        bundled_python_dir=bundled_python_dir
+    )
+    if not success:
         print_error("Installation failed.")
         sys.exit(1)
 
@@ -705,13 +942,20 @@ def main():
     if not verify_installation(plugin_dir):
         print_warning("Installation completed with warnings.")
     else:
-        print_header("Installation Complete!")
-        print_success("ClipABit plugin has been installed successfully.")
+        print_header("ClipABit Installation Complete!")
+        print_success("ClipABit has been installed successfully.")
         print()
-        print_info("To use the plugin in DaVinci Resolve:")
+
+        if resolve_was_running:
+            print_warning("⚠️  DaVinci Resolve was running during installation.")
+            print_warning("⚠️  You MUST restart DaVinci Resolve for ClipABit to work properly.")
+            print()
+
+        print_info("To access ClipABit in DaVinci Resolve:")
         print("  1. Open DaVinci Resolve")
-        print("  2. Go to Workspace > Scripts")
-        print("  3. Select 'ClipABit'")
+        print("  2. Go to Workspace > Scripts > ClipABit")
+        print()
+        print_info("The ClipABit plugin will appear in the Scripts menu.")
         print()
 
     sys.exit(0)

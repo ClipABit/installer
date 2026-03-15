@@ -4,21 +4,38 @@ Builds macOS `.pkg` and Windows `.exe` installers for the ClipABit DaVinci Resol
 
 ## Architecture
 
-The installer deploys files into the DaVinci Resolve Fusion directory:
+The installer deploys files into two locations:
 
+**1. DaVinci Resolve Fusion directory** (plugin code):
 ```
 Fusion/
 ├── Scripts/Utility/
 │   └── ClipABit.py              # Bootstrap shim (generated at install)
 └── Modules/
     ├── clipabit/                 # Plugin package (from GitHub release)
-    ├── clipabit_deps/            # pip dependencies (PyQt6, requests, etc.)
     └── assets/                   # Logo SVGs
 ```
 
-**Bootstrap shim**: Prepends a config-loader and dependency-path-adder to the original `clipabit.py` shim. This loads Auth0 credentials from an obfuscated `config.dat` and adds `clipabit_deps/` to `sys.path` before the plugin starts.
+**2. ClipABit application directory** (runtime + dependencies):
+```
+# macOS: ~/Library/Application Support/ClipABit/
+ClipABit/
+├── python/                       # Bundled Python 3.11 runtime
+├── deps/                         # pip dependencies (PyQt6, requests, etc.)
+└── config.dat                    # Obfuscated Auth0 config
 
-**Config file**: `~/Library/Application Support/ClipABit/config.dat` (macOS) or `%APPDATA%/ClipABit/config.dat` (Windows). XOR + base64 encoded to prevent casual env switching.
+# Windows (split between LOCALAPPDATA and APPDATA):
+%LOCALAPPDATA%\ClipABit\          # Non-roaming (large files)
+├── python\                       # Bundled Python 3.11 runtime
+└── deps\                         # pip dependencies (PyQt6, requests, etc.)
+
+%APPDATA%\ClipABit\               # Roaming (small config)
+└── config.dat                    # Obfuscated Auth0 config
+```
+
+**Why split locations?** Heavy, stable components (Python runtime ~100MB, dependencies) live outside Resolve so they survive Resolve updates/reinstalls. Lightweight plugin code (~few MB) lives in Resolve's Modules directory where it can be easily updated. On Windows, large files use `%LOCALAPPDATA%` (non-roaming) while config uses `%APPDATA%` (roaming) so it follows the user between machines.
+
+**Bootstrap shim**: Prepends a config-loader and dependency-path-adder to the original `clipabit.py` shim. This loads Auth0 credentials from the obfuscated `config.dat` and adds the `deps/` directory to `sys.path` before the plugin starts.
 
 ## Prerequisites
 
@@ -94,10 +111,22 @@ python3 installer-script.py --tag v1.2.3
 After installation, check these paths exist:
 
 ```bash
-# macOS
+# macOS - Resolve directories
 ls ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion/Scripts/Utility/ClipABit.py
 ls ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion/Modules/clipabit/__init__.py
-ls ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion/Modules/clipabit_deps/
 ls ~/Library/Application\ Support/Blackmagic\ Design/DaVinci\ Resolve/Fusion/Modules/assets/
+
+# macOS - ClipABit application directory
+ls ~/Library/Application\ Support/ClipABit/python/bin/python3.11
+ls ~/Library/Application\ Support/ClipABit/deps/
 ls ~/Library/Application\ Support/ClipABit/config.dat
+
+# Windows - Resolve directories
+dir "%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Scripts\Utility\ClipABit.py"
+dir "%APPDATA%\Blackmagic Design\DaVinci Resolve\Support\Fusion\Modules\clipabit"
+
+# Windows - ClipABit application directory
+dir "%LOCALAPPDATA%\ClipABit\python\python.exe"
+dir "%LOCALAPPDATA%\ClipABit\deps"
+dir "%APPDATA%\ClipABit\config.dat"
 ```

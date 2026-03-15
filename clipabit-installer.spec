@@ -13,6 +13,8 @@ a = Analysis(
     binaries=[],
     datas=[
         ('plugin', 'plugin'),
+        # Windows build downloads Python to build/python/python, not ./python
+        ('build/python/python', 'python'),
     ],
     hiddenimports=['tomllib'],
     hookspath=[],
@@ -28,7 +30,7 @@ a = Analysis(
 # Filter out unwanted files from datas
 a.datas = [
     (dest, source, type_) for dest, source, type_ in a.datas
-    if not any(excl in dest for excl in ['.venv', '__pycache__', '.pyc', '.git'])
+    if not any(excl in dest for excl in ['.venv', '__pycache__', '.pyc', '.git', 'tests', 'docs'])
 ]
 
 pyz = PYZ(a.pure, a.zipped_data, cipher=block_cipher)
@@ -53,5 +55,5 @@ exe = EXE(
     target_arch=None,
     codesign_identity=None,
     entitlements_file=None,
-    icon='icon.ico',  # Add your icon file
+    icon='icon.ico',
 )
