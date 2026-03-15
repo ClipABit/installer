@@ -2,11 +2,11 @@
 setlocal EnableDelayedExpansion
 REM Build ClipABit Windows Installer using PyInstaller
 REM
-REM Optional env vars:
+REM Required env vars for Auth0 config baking:
 REM   CLIPABIT_AUTH0_DOMAIN
 REM   CLIPABIT_AUTH0_CLIENT_ID
 REM   CLIPABIT_AUTH0_AUDIENCE
-REM   CLIPABIT_ENVIRONMENT  (defaults to "prod")
+REM   CLIPABIT_ENVIRONMENT  (optional, defaults to "prod")
 
 echo ========================================
 echo   ClipABit Windows Installer Builder
@@ -30,7 +30,6 @@ IF "%CLIPABIT_ENVIRONMENT%"=="" SET CLIPABIT_ENVIRONMENT=prod
 IF "%CLIPABIT_AUTH0_DOMAIN%"=="" GOTO :MISSING_AUTH0
 IF "%CLIPABIT_AUTH0_CLIENT_ID%"=="" GOTO :MISSING_AUTH0
 IF "%CLIPABIT_AUTH0_AUDIENCE%"=="" GOTO :MISSING_AUTH0
-IF "%CLIPABIT_ENVIRONMENT%"=="" GOTO :MISSING_AUTH0
 
 echo [0/7] Auth0 configuration validated.
 GOTO :CONFIG_OK
@@ -65,26 +64,18 @@ REM 3. Find the .sha256 file for the corresponding platform archive OR
 REM    calculate it manually after downloading:
 REM    certutil -hashfile cpython-<version>+<tag>-<platform>-install_only.tar.gz SHA256
 REM -------------------------------------------------------------------
-REM -------------------------------------------------------------------
 set PYTHON_CACHE_DIR=%TEMP%\clipabit-python-cache
-REM -------------------------------------------------------------------
-
 set PYTHON_VERSION=3.11.15
 set PYTHON_BUILD_TAG=20260303
 set PYTHON_SHA256=6f194e1ede02260fd3d758893bbf1d3bb4084652d436a8300a229da721c3ddf8
 REM -------------------------------------------------------------------
 
 REM Check if Python is installed (for build tooling — not the bundled runtime)
-REM NOTE: This is the HOST Python used to run PyInstaller, not the bundled
-REM Python 3.11 that gets packaged into the .exe for end users.
 python --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH
     echo.
-    echo Please install Python 3.12+ from:
-    echo https://www.python.org/downloads/
-    echo.
-    echo Make sure to check "Add Python to PATH" during installation
+    echo Please install Python 3.12+ from: https://www.python.org/downloads/
     pause
     exit /b 1
 )
@@ -100,9 +91,6 @@ if errorlevel 1 (
 echo.
 echo [2/7] Installing build dependencies...
 python -m pip install --upgrade pip >nul 2>&1
-REM Pin PyInstaller to a vetted version to reduce supply-chain risk.
-REM Using ==6.16.0 prevents auto-upgrading to potentially compromised versions.
-REM Update this pin explicitly after reviewing new PyInstaller releases.
 python -m pip install pyinstaller==6.16.0 >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Failed to install build dependencies
@@ -126,19 +114,15 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
         exit /b 1
     )
 
-    REM Verify checksum to ensure download integrity (corrupted/MITM detection)
     echo      Verifying checksum...
     for /f "skip=1 tokens=*" %%H in ('certutil -hashfile "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" SHA256 ^| findstr /v "CertUtil"') do (
         set "ACTUAL_SHA256=%%H"
         goto :check_hash
     )
     :check_hash
-    REM Remove any spaces from certutil output
     set "ACTUAL_SHA256=!ACTUAL_SHA256: =!"
     if /i not "!ACTUAL_SHA256!"=="%PYTHON_SHA256%" (
         echo [ERROR] SHA256 mismatch!
-        echo   Expected: %PYTHON_SHA256%
-        echo   Actual:   !ACTUAL_SHA256!
         del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" >nul 2>&1
         pause
         exit /b 1
@@ -152,10 +136,7 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
     echo      Using cached Python from %PYTHON_CACHE_DIR%\python
 )
 
-REM Validate bundled Python (BUILD-TIME smoke test on developer machine)
-REM This catches corrupted downloads before packaging. A separate install-time
-REM validation happens on the end user's machine (see installer-script.py).
-"%PYTHON_CACHE_DIR%\python\python.exe" --version
+"%PYTHON_CACHE_DIR%\python\python.exe" --version >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Bundled Python validation failed
     pause
@@ -169,11 +150,11 @@ echo      Refreshing plugin source from GitHub...
 if exist "plugin" rd /s /q "plugin"
 
 if "%CLIPABIT_ENVIRONMENT%"=="staging" (
-    echo      Staging environment detected. Fetching latest pre-release/release...
+    echo      Staging environment detected. Fetching latest pre-release/release metadata...
     set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
     for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%')[0].tag_name"') do set LATEST_TAG=%%i
 ) else (
-    echo      Production environment. Fetching latest production release...
+    echo      Production environment. Fetching latest production release metadata...
     set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
     for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%').tag_name"') do set LATEST_TAG=%%i
 )
@@ -196,11 +177,9 @@ if errorlevel 1 (
 )
 
 echo      Extracting...
-REM Clean any stale extractions in TEMP
 for /d %%d in ("%TEMP%\Resolve-Plugin-*") do rd /s /q "%%d"
 tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
 
-REM Find the extracted folder and copy its contents
 for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
     xcopy "%%d" "plugin\" /E /I /Y >nul
     rd /s /q "%%d"
@@ -217,7 +196,7 @@ if not exist "plugin\clipabit.py" (
     exit /b 1
 )
 if not exist "plugin\pyproject.toml" (
-    echo [ERROR] plugin\pyproject.toml missing. Required for dependency resolution.
+    echo [ERROR] plugin\pyproject.toml missing.
     pause
     exit /b 1
 )
@@ -236,7 +215,6 @@ echo      Plugin validated.
 echo.
 echo [5/7] Preparing installer script...
 REM Template Auth0 values into installer-script.py using PowerShell
-REM This mirrors the 'sed' behavior in build-pkg.sh to bake credentials into the binary.
 copy /y "installer-script.py" "installer-script.py.bak" >nul
 powershell -Command "(Get-Content installer-script.py) -replace 'os.environ.get\(\"CLIPABIT_AUTH0_DOMAIN\", \"\"\)', '\"%CLIPABIT_AUTH0_DOMAIN%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_CLIENT_ID\", \"\"\)', '\"%CLIPABIT_AUTH0_CLIENT_ID%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_AUDIENCE\", \"\"\)', '\"%CLIPABIT_AUTH0_AUDIENCE%\"' -replace 'os.environ.get\(\"CLIPABIT_ENVIRONMENT\", \"prod\"\)', '\"%CLIPABIT_ENVIRONMENT%\"' | Set-Content installer-script.py"
 if errorlevel 1 (
@@ -248,11 +226,6 @@ if errorlevel 1 (
 
 echo.
 echo [6/7] Validating binary wheel availability...
-REM IMPORTANT: The bundled Python has NO C compiler. We must verify that all
-REM dependencies have pre-built binary wheels (no source-only packages).
-REM If this check passes at build time, we guarantee install-time won't fail.
-
-REM Extract dependencies from pyproject.toml to a temporary requirements file
 set TEMP_REQS=%TEMP%\clipabit-reqs-%RANDOM%.txt
 "%PYTHON_CACHE_DIR%\python\python.exe" -c "import tomllib; data = tomllib.load(open('plugin/pyproject.toml', 'rb')); [print(d) for d in data['project']['dependencies']]" > "%TEMP_REQS%"
 if errorlevel 1 (
@@ -264,7 +237,6 @@ if errorlevel 1 (
 "%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r "%TEMP_REQS%" >nul 2>&1
 if errorlevel 1 (
     echo [ERROR] Not all dependencies have binary wheels available.
-    echo The bundled Python has no C compiler - sdist-only packages will fail at install time.
     del "%TEMP_REQS%" >nul 2>&1
     pause
     exit /b 1
@@ -274,10 +246,13 @@ echo      All dependencies have binary wheels
 
 echo.
 echo [7/7] Building Windows executable...
+echo      Baking plugin release: %LATEST_TAG%
+REM Create release.json for metadata (read by installer-script.py)
+echo {"tag": "%LATEST_TAG%", "environment": "%CLIPABIT_ENVIRONMENT%"} > release.json
 pyinstaller clipabit-installer.spec
 set BUILD_EXIT_CODE=%errorlevel%
 
-REM Always restore installer-script.py from backup to prevent leaking credentials in the repo
+REM Always restore installer-script.py from backup
 if exist "installer-script.py.bak" (
     move /y "installer-script.py.bak" "installer-script.py" >nul
 )
@@ -298,9 +273,6 @@ if exist dist\ClipABit-Installer.exe (
     echo.
     echo Installer location: dist\ClipABit-Installer.exe
     for %%A in (dist\ClipABit-Installer.exe) do echo File size: %%~zA bytes
-    echo.
-    echo You can now distribute this .exe file.
-    echo The bundled Python runtime is included - no Python installation required.
     echo.
 ) else (
     echo [ERROR] Executable not found after build!
