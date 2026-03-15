@@ -58,6 +58,7 @@ echo ""
 echo "Running ClipABit Plugin Installer..."
 echo "  User: $CURRENT_USER"
 echo "  Home: $USER_HOME"
+echo "  Plugin Release: __PLUGIN_RELEASE__"
 
 # -------------------------------------------------------------------
 # Paths

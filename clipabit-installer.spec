@@ -4,6 +4,7 @@
 # Build with: pyinstaller clipabit-installer.spec
 
 # -*- mode: python ; coding: utf-8 -*-
+import os
 
 block_cipher = None
 
@@ -13,8 +14,9 @@ a = Analysis(
     binaries=[],
     datas=[
         ('plugin', 'plugin'),
-        # Windows build downloads Python to build/python/python, not ./python
-        ('build/python/python', 'python'),
+        # Get python from env var or fallback
+        (os.path.join(os.environ.get('PYTHON_CACHE_DIR', 'build/python'), 'python'), 'python'),
+        ('release.json', '.'),
     ],
     hiddenimports=['tomllib'],
     hookspath=[],
