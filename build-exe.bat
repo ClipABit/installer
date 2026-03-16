@@ -152,16 +152,16 @@ if exist "plugin" rd /s /q "plugin"
 if "%CLIPABIT_ENVIRONMENT%"=="staging" (
     echo      Staging environment detected. Fetching latest pre-release/release metadata...
     set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
-    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%')[0].tag_name"') do set LATEST_TAG=%%i
+    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!')[0].tag_name"') do set LATEST_TAG=%%i
 ) else (
     echo      Production environment. Fetching latest production release metadata...
     set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
-    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '%API_URL%').tag_name"') do set LATEST_TAG=%%i
+    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!').tag_name"') do set LATEST_TAG=%%i
 )
 
 if "!LATEST_TAG!"=="" (
     echo [ERROR] Could not fetch release tag from GitHub API:
-!API_URL!
+    echo !API_URL!
     pause
     exit /b 1
 )
