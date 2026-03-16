@@ -14,6 +14,15 @@ echo ========================================
 echo.
 
 REM -------------------------------------------------------------------
+REM Clean previous builds
+REM -------------------------------------------------------------------
+echo Cleaning previous builds...
+if exist "dist" rd /s /q "dist"
+if exist "build" rd /s /q "build"
+mkdir "dist"
+mkdir "build"
+
+REM -------------------------------------------------------------------
 REM Configuration
 REM -------------------------------------------------------------------
 IF "%CLIPABIT_ENVIRONMENT%"=="" SET CLIPABIT_ENVIRONMENT=prod
@@ -200,8 +209,13 @@ for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
 :plugin_copied
 del "%TEMP%\plugin.zip" >nul 2>&1
 echo      Plugin downloaded and staged.
-REM Validate full plugin structure regardless of download. Even if plugin/
-REM exists from a previous build, ensure it's complete before proceeding.
+
+REM Validate full plugin structure
+if not exist "plugin\clipabit.py" (
+    echo [ERROR] plugin\clipabit.py missing.
+    pause
+    exit /b 1
+)
 if not exist "plugin\pyproject.toml" (
     echo [ERROR] plugin\pyproject.toml missing. Required for dependency resolution.
     pause
@@ -212,9 +226,28 @@ if not exist "plugin\clipabit" (
     pause
     exit /b 1
 )
+if not exist "plugin\scripts" (
+    echo [ERROR] plugin\scripts directory missing.
+    pause
+    exit /b 1
+)
+echo      Plugin validated.
 
 echo.
-echo [5/7] Validating binary wheel availability...
+echo [5/7] Preparing installer script...
+REM Template Auth0 values into installer-script.py using PowerShell
+REM This mirrors the 'sed' behavior in build-pkg.sh to bake credentials into the binary.
+copy /y "installer-script.py" "installer-script.py.bak" >nul
+powershell -Command "(Get-Content installer-script.py) -replace 'os.environ.get\(\"CLIPABIT_AUTH0_DOMAIN\", \"\"\)', '\"%CLIPABIT_AUTH0_DOMAIN%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_CLIENT_ID\", \"\"\)', '\"%CLIPABIT_AUTH0_CLIENT_ID%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_AUDIENCE\", \"\"\)', '\"%CLIPABIT_AUTH0_AUDIENCE%\"' -replace 'os.environ.get\(\"CLIPABIT_ENVIRONMENT\", \"prod\"\)', '\"%CLIPABIT_ENVIRONMENT%\"' | Set-Content installer-script.py"
+if errorlevel 1 (
+    echo [ERROR] Failed to template installer-script.py
+    move /y "installer-script.py.bak" "installer-script.py" >nul
+    pause
+    exit /b 1
+)
+
+echo.
+echo [6/7] Validating binary wheel availability...
 REM IMPORTANT: The bundled Python has NO C compiler. We must verify that all
 REM dependencies have pre-built binary wheels (no source-only packages).
 REM If this check passes at build time, we guarantee install-time won't fail.
@@ -240,9 +273,16 @@ del "%TEMP_REQS%" >nul 2>&1
 echo      All dependencies have binary wheels
 
 echo.
-echo [6/7] Building Windows executable...
+echo [7/7] Building Windows executable...
 pyinstaller clipabit-installer.spec
-if errorlevel 1 (
+set BUILD_EXIT_CODE=%errorlevel%
+
+REM Always restore installer-script.py from backup to prevent leaking credentials in the repo
+if exist "installer-script.py.bak" (
+    move /y "installer-script.py.bak" "installer-script.py" >nul
+)
+
+if %BUILD_EXIT_CODE% neq 0 (
     echo [ERROR] Build failed!
     pause
     exit /b 1
