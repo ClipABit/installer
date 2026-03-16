@@ -155,9 +155,6 @@ fi
 echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 
 # -------------------------------------------------------------------
-# Ensure plugin/ exists (download if needed)
-# -------------------------------------------------------------------
-# -------------------------------------------------------------------
 # Plugin retrieval
 # -------------------------------------------------------------------
 # Fetch the latest release tag metadata if in staging/prod environment.
@@ -178,43 +175,42 @@ fi
 
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
-if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
-    echo "Plugin not found locally. Downloading from GitHub..."
-    
-    # Check for jq (required for parsing GitHub API response)
-    if ! command -v jq &> /dev/null; then
-        echo "ERROR: 'jq' is not installed. It is required to parse GitHub API responses."
-        echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
-        exit 1
-    fi
-    
-    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-        echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
-        exit 1
-    fi
-    
-    ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
-    
-    TEMP_DIR=$(mktemp -d)
-    echo "  Downloading ${ARCHIVE_URL}..."
-    if ! curl -fSL -o "${TEMP_DIR}/plugin.zip" "${ARCHIVE_URL}"; then
-        echo "ERROR: Failed to download plugin archive."
-        rm -rf "${TEMP_DIR}"
-        exit 1
-    fi
-    
-    echo "  Extracting..."
-    unzip -q "${TEMP_DIR}/plugin.zip" -d "${TEMP_DIR}"
-    
-    # Find the extracted folder (it will be named Resolve-Plugin-<tag>)
-    EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
-    
-    mkdir -p "${PLUGIN_DIR}"
-    # Use rsync for better handling of file copies and excludes
-    rsync -av --progress "${EXTRACTED_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
-    rm -rf "${TEMP_DIR}"
-    echo "  Plugin downloaded and staged."
+echo "Refreshing plugin source from GitHub..."
+rm -rf "${PLUGIN_DIR}"
+
+# Check for jq (required for parsing GitHub API response)
+if ! command -v jq &> /dev/null; then
+    echo "ERROR: 'jq' is not installed. It is required to parse GitHub API responses."
+    echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
+    exit 1
 fi
+
+if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+    echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
+    exit 1
+fi
+
+ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
+
+TEMP_DIR=$(mktemp -d)
+echo "  Downloading ${ARCHIVE_URL}..."
+if ! curl -fSL -o "${TEMP_DIR}/plugin.zip" "${ARCHIVE_URL}"; then
+    echo "ERROR: Failed to download plugin archive."
+    rm -rf "${TEMP_DIR}"
+    exit 1
+fi
+
+echo "  Extracting..."
+unzip -q "${TEMP_DIR}/plugin.zip" -d "${TEMP_DIR}"
+
+# Find the extracted folder (it will be named Resolve-Plugin-<tag>)
+EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
+
+mkdir -p "${PLUGIN_DIR}"
+# Use rsync for better handling of file copies and excludes
+rsync -av --progress "${EXTRACTED_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
+rm -rf "${TEMP_DIR}"
+echo "  Plugin downloaded and staged."
 
 # Validate plugin
 if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
@@ -318,13 +314,36 @@ chmod +x "${PAYLOAD_DIR}/ClipABit/installer-script.py"
 # Build .pkg
 # -------------------------------------------------------------------
 echo "Building package..."
+
+# 1. Build the component package
+# This contains the actual files (payload) and the postinstall script.
+COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
 pkgbuild \
     --root "${PAYLOAD_DIR}" \
     --scripts "${SCRIPTS_DIR}" \
     --identifier "${PKG_IDENTIFIER}" \
     --version "${PKG_VERSION}" \
     --install-location "${INSTALL_LOCATION}" \
-    "${OUTPUT_DIR}/${PKG_NAME}.pkg"
+    "${COMPONENT_PKG}"
+
+# 2. Synthesize distribution file
+# This is the 'blueprint' for the final installer UI.
+DISTRIBUTION_XML="${BUILD_DIR}/distribution.xml"
+productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
+
+# 3. Modify distribution.xml to include conclusion resource
+# (sed -i on macOS needs an empty string for the extension)
+sed -i '' "s|</installer-gui-script>|<conclusion file=\"conclusion.html\" mime-type=\"text/html\" />\n</installer-gui-script>|" "${DISTRIBUTION_XML}"
+
+# 4. Build the final distribution package
+# This combines the component package with resources like conclusion.html.
+FINAL_PKG="${OUTPUT_DIR}/${PKG_NAME}.pkg"
+productbuild \
+    --distribution "${DISTRIBUTION_XML}" \
+    --resources "${SCRIPT_DIR}/installer-resources" \
+    --package-path "${BUILD_DIR}" \
+    --version "${PKG_VERSION}" \
+    "${FINAL_PKG}"
 
 # -------------------------------------------------------------------
 # Post-build verification
@@ -332,35 +351,45 @@ pkgbuild \
 # Expand and inspect the .pkg before shipping to catch missing files or
 # accidentally-included bloat (tests, docs, .git). This is a sanity check
 # that runs before the package reaches end users.
-#
-# NOTE: This is different from postinstall validation:
-#   - Build-time (here): QA on developer machine, catches build script bugs
-#   - Install-time (postinstall): corruption detection on end user machine
-# Both are needed - fail fast at build time, fail safe at install time.
-if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
+if [ -f "${FINAL_PKG}" ]; then
     echo ""
     echo "  Verifying .pkg contents..."
     PKG_EXPAND_DIR=$(mktemp -d)
-    pkgutil --expand "${OUTPUT_DIR}/${PKG_NAME}.pkg" "${PKG_EXPAND_DIR}/expanded"
+    pkgutil --expand "${FINAL_PKG}" "${PKG_EXPAND_DIR}/expanded"
 
-    # Check for required files
-    # Note: we must use lsbom or expand the Payload to see the actual files.
-    # We use 'lsbom' on the Bom file which is much faster than extracting.
-    BOM_CONTENTS=$(lsbom "${PKG_EXPAND_DIR}/expanded/Bom")
+    # Find all 'Bom' (Bill of Materials) files in the expanded package.
+    # For productbuild, the component packages are expanded into subdirectories.
+    BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
     
+    # Check for required files
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
-        if grep -q "$required" <<< "$BOM_CONTENTS"; then
+        FOUND=0
+        for bom in ${BOM_FILES}; do
+            if lsbom "${bom}" | grep -q "${required}"; then
+                FOUND=1
+                break
+            fi
+        done
+        if [ $FOUND -eq 1 ]; then
             echo "    OK: $required found in payload"
         else
-            echo "    WARNING: $required not found in payload"
+            echo "    WARNING: ${required} not found in payload"
         fi
     done
-    # Check excluded files
+    
+    # Check excluded files (ensure bloat was correctly removed)
     for excluded in "tests/" "docs/" ".git/"; do
-        if grep -q "$excluded" <<< "$BOM_CONTENTS"; then
+        FOUND_EXCLUDED=0
+        for bom in ${BOM_FILES}; do
+            if lsbom "${bom}" | grep -q "${excluded}"; then
+                FOUND_EXCLUDED=1
+                break
+            fi
+        done
+        if [ $FOUND_EXCLUDED -eq 1 ]; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
-            echo "    OK: $excluded not in payload"
+            echo "    OK: ${excluded} not in payload"
         fi
     done
 
@@ -368,8 +397,8 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
 
     echo ""
     echo "  Package built successfully!"
-    echo "  Location: ${OUTPUT_DIR}/${PKG_NAME}.pkg"
-    echo "  Size: $(du -h "${OUTPUT_DIR}/${PKG_NAME}.pkg" | cut -f1)"
+    echo "  Location: ${FINAL_PKG}"
+    echo "  Size: $(du -h "${FINAL_PKG}" | cut -f1)"
     echo ""
 else
     echo "ERROR: Package build failed!"
