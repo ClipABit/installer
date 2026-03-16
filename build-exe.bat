@@ -143,8 +143,8 @@ if errorlevel 1 (
     exit /b 1
 )
 echo      Bundled Python validated
-
 echo.
+
 echo [4/7] Downloading plugin from GitHub...
 echo      Refreshing plugin source from GitHub...
 if exist "plugin" rd /s /q "plugin"
@@ -160,14 +160,15 @@ if "%CLIPABIT_ENVIRONMENT%"=="staging" (
 )
 
 if "!LATEST_TAG!"=="" (
-    echo [ERROR] Could not fetch release tag from GitHub API: !API_URL!
+    echo [ERROR] Could not fetch release tag from GitHub API:
+!API_URL!
     pause
     exit /b 1
 )
 
 echo      Latest release: !LATEST_TAG!
 set ARCHIVE_URL=https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/!LATEST_TAG!.zip
-
+      
 echo      Downloading !ARCHIVE_URL!...
 curl -fSL -o "%TEMP%\plugin.zip" "!ARCHIVE_URL!"
 if errorlevel 1 (
