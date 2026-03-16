@@ -177,9 +177,11 @@ if errorlevel 1 (
 )
 
 echo      Extracting...
+REM Clean any stale extractions in TEMP
 for /d %%d in ("%TEMP%\Resolve-Plugin-*") do rd /s /q "%%d"
 tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
 
+REM Find the extracted folder and copy its contents
 for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
     xcopy "%%d" "plugin\" /E /I /Y >nul
     rd /s /q "%%d"
@@ -215,6 +217,7 @@ echo      Plugin validated.
 echo.
 echo [5/7] Preparing installer script...
 REM Template Auth0 values into installer-script.py using PowerShell
+REM This mirrors the 'sed' behavior in build-pkg.sh to bake credentials into the binary.
 copy /y "installer-script.py" "installer-script.py.bak" >nul
 powershell -Command "(Get-Content installer-script.py) -replace 'os.environ.get\(\"CLIPABIT_AUTH0_DOMAIN\", \"\"\)', '\"%CLIPABIT_AUTH0_DOMAIN%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_CLIENT_ID\", \"\"\)', '\"%CLIPABIT_AUTH0_CLIENT_ID%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_AUDIENCE\", \"\"\)', '\"%CLIPABIT_AUTH0_AUDIENCE%\"' -replace 'os.environ.get\(\"CLIPABIT_ENVIRONMENT\", \"prod\"\)', '\"%CLIPABIT_ENVIRONMENT%\"' | Set-Content installer-script.py"
 if errorlevel 1 (
@@ -226,6 +229,10 @@ if errorlevel 1 (
 
 echo.
 echo [6/7] Validating binary wheel availability...
+REM IMPORTANT: The bundled Python has NO C compiler. We must verify that all
+REM dependencies have pre-built binary wheels (no source-only packages).
+REM If this check passes at build time, we guarantee install-time won't fail.
+
 set TEMP_REQS=%TEMP%\clipabit-reqs-%RANDOM%.txt
 "%PYTHON_CACHE_DIR%\python\python.exe" -c "import tomllib; data = tomllib.load(open('plugin/pyproject.toml', 'rb')); [print(d) for d in data['project']['dependencies']]" > "%TEMP_REQS%"
 if errorlevel 1 (
@@ -264,7 +271,7 @@ if %BUILD_EXIT_CODE% neq 0 (
 )
 
 echo.
-echo [7/7] Verifying build...
+echo Verifying build...
 if exist dist\ClipABit-Installer.exe (
     echo.
     echo ========================================
