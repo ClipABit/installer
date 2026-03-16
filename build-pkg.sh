@@ -308,9 +308,9 @@ chmod +x "${PAYLOAD_DIR}/ClipABit/installer-script.py"
 # Build .pkg
 # -------------------------------------------------------------------
 echo "Building package..."
-# 1. Build the component package first
-COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
-# 1. Build the component package first
+
+# 1. Build the component package
+# This contains the actual files (payload) and the postinstall script.
 COMPONENT_PKG="${BUILD_DIR}/${PKG_NAME}-Component.pkg"
 pkgbuild \
     --root "${PAYLOAD_DIR}" \
@@ -320,37 +320,24 @@ pkgbuild \
     --install-location "${INSTALL_LOCATION}" \
     "${COMPONENT_PKG}"
 
-# 2. Synthesize distribution file and use productbuild for the final package
-# This allows us to include resources like Conclusion.html for the final screen.
+# 2. Synthesize distribution file
+# This is the 'blueprint' for the final installer UI.
 DISTRIBUTION_XML="${BUILD_DIR}/distribution.xml"
 productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
 
-# Modify distribution.xml to include conclusion resource
+# 3. Modify distribution.xml to include conclusion resource
 # (sed -i on macOS needs an empty string for the extension)
 sed -i '' "s|</installer-script>|<conclusion file=\"Conclusion.html\" />\n</installer-script>|" "${DISTRIBUTION_XML}"
 
+# 4. Build the final distribution package
+# This combines the component package with resources like Conclusion.html.
+FINAL_PKG="${OUTPUT_DIR}/${PKG_NAME}.pkg"
 productbuild \
     --distribution "${DISTRIBUTION_XML}" \
     --resources "${SCRIPT_DIR}/installer-resources" \
     --package-path "${BUILD_DIR}" \
     --version "${PKG_VERSION}" \
-    "${COMPONENT_PKG}"
-
-# 2. Synthesize distribution file and use productbuild for the final package
-# This allows us to include resources like Conclusion.html for the final screen.
-DISTRIBUTION_XML="${BUILD_DIR}/distribution.xml"
-productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
-
-# Modify distribution.xml to include conclusion resource
-# (sed -i on macOS needs an empty string for the extension)
-sed -i '' "s|</installer-script>|<conclusion file=\"Conclusion.html\" />\n</installer-script>|" "${DISTRIBUTION_XML}"
-
-productbuild \
-    --distribution "${DISTRIBUTION_XML}" \
-    --resources "${SCRIPT_DIR}/installer-resources" \
-    --package-path "${BUILD_DIR}" \
-    --version "${PKG_VERSION}" \
-    "${OUTPUT_DIR}/${PKG_NAME}.pkg"
+    "${FINAL_PKG}"
 
 # -------------------------------------------------------------------
 # Post-build verification
@@ -358,25 +345,17 @@ productbuild \
 # Expand and inspect the .pkg before shipping to catch missing files or
 # accidentally-included bloat (tests, docs, .git). This is a sanity check
 # that runs before the package reaches end users.
-#
-# NOTE: This is different from postinstall validation:
-#   - Build-time (here): QA on developer machine, catches build script bugs
-#   - Install-time (postinstall): corruption detection on end user machine
-# Both are needed - fail fast at build time, fail safe at install time.
-if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
+if [ -f "${FINAL_PKG}" ]; then
     echo ""
     echo "  Verifying .pkg contents..."
     PKG_EXPAND_DIR=$(mktemp -d)
-    pkgutil --expand "${OUTPUT_DIR}/${PKG_NAME}.pkg" "${PKG_EXPAND_DIR}/expanded"
+    pkgutil --expand "${FINAL_PKG}" "${PKG_EXPAND_DIR}/expanded"
 
-    # Check for required files
-    # Note: for productbuild, the component packages are expanded into subdirectories.
-    # We find all 'Bom' files and check them.
-    BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
-    # Note: for productbuild, the component packages are expanded into subdirectories.
-    # We find all 'Bom' files and check them.
+    # Find all 'Bom' (Bill of Materials) files in the expanded package.
+    # For productbuild, the component packages are expanded into subdirectories.
     BOM_FILES=$(find "${PKG_EXPAND_DIR}/expanded" -name "Bom")
     
+    # Check for required files
     for required in "installer-script.py" "python" "clipabit/__init__.py"; do
         FOUND=0
         for bom in ${BOM_FILES}; do
@@ -385,16 +364,14 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
                 break
             fi
         done
-        if grep -q "$required" <<< "$BOM_CONTENTS"; then
+        if [ $FOUND -eq 1 ]; then
             echo "    OK: $required found in payload"
         else
-            echo "    WARNING: ${required} not found in payload"
             echo "    WARNING: ${required} not found in payload"
         fi
     done
     
-    
-    # Check excluded files
+    # Check excluded files (ensure bloat was correctly removed)
     for excluded in "tests/" "docs/" ".git/"; do
         FOUND_EXCLUDED=0
         for bom in ${BOM_FILES}; do
@@ -403,10 +380,9 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
                 break
             fi
         done
-        if grep -q "$excluded" <<< "$BOM_CONTENTS"; then
+        if [ $FOUND_EXCLUDED -eq 1 ]; then
             echo "    WARNING: $excluded found in payload (should be excluded)"
         else
-            echo "    OK: ${excluded} not in payload"
             echo "    OK: ${excluded} not in payload"
         fi
     done
@@ -415,10 +391,11 @@ if [ -f "${OUTPUT_DIR}/${PKG_NAME}.pkg" ]; then
 
     echo ""
     echo "  Package built successfully!"
-    echo "  Location: ${OUTPUT_DIR}/${PKG_NAME}.pkg"
-    echo "  Size: $(du -h "${OUTPUT_DIR}/${PKG_NAME}.pkg" | cut -f1)"
+    echo "  Location: ${FINAL_PKG}"
+    echo "  Size: $(du -h "${FINAL_PKG}" | cut -f1)"
     echo ""
 else
     echo "ERROR: Package build failed!"
     exit 1
 fi
+
