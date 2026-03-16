@@ -155,8 +155,24 @@ fi
 echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 
 # -------------------------------------------------------------------
-# Ensure plugin/ exists (download if needed)
+# Plugin retrieval
 # -------------------------------------------------------------------
+# Fetch the latest release tag metadata if in staging/prod environment.
+# This ensures even local builds are correctly labeled with the tag they represent.
+if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
+    echo "  Staging environment detected. Fetching latest pre-release/release metadata..."
+    API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
+    LATEST_TAG=$(curl -s "$API_URL" | jq -r '.[0].tag_name')
+elif [ "$CLIPABIT_ENVIRONMENT" = "prod" ]; then
+    echo "  Production environment. Fetching latest production release metadata..."
+    API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
+    LATEST_TAG=$(curl -s "$API_URL" | jq -r '.tag_name')
+fi
+
+if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
+    echo "  Latest release tag: ${LATEST_TAG}"
+fi
+
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
 if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
@@ -168,23 +184,12 @@ if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
         echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
         exit 1
     fi
-
-    if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
-        echo "  Staging environment detected. Fetching latest pre-release/release..."
-        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
-        LATEST_TAG=$(curl -s "$API_URL" | jq -r '.[0].tag_name')
-    else
-        echo "  Production environment. Fetching latest production release..."
-        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
-        LATEST_TAG=$(curl -s "$API_URL" | jq -r '.tag_name')
-    fi
     
     if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
         echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
         exit 1
     fi
     
-    echo "  Latest release: ${LATEST_TAG}"
     ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
     
     TEMP_DIR=$(mktemp -d)
@@ -255,6 +260,7 @@ echo "  All dependencies have binary wheels."
 # -------------------------------------------------------------------
 # Build payload
 # -------------------------------------------------------------------
+echo "Packaging Plugin Release: ${LATEST_TAG:-local-build}"
 echo "Creating build directories..."
 mkdir -p "${PAYLOAD_DIR}/ClipABit"
 mkdir -p "${OUTPUT_DIR}"
@@ -293,6 +299,7 @@ sed -i.tmp \
     -e "s|__AUTH0_CLIENT_ID__|${CLIPABIT_AUTH0_CLIENT_ID}|g" \
     -e "s|__AUTH0_AUDIENCE__|${CLIPABIT_AUTH0_AUDIENCE}|g" \
     -e "s|__ENVIRONMENT__|${CLIPABIT_ENVIRONMENT}|g" \
+    -e "s|__PLUGIN_RELEASE__|${LATEST_TAG:-local-build}|g" \
     "${SCRIPTS_DIR}/postinstall"
 
 if [ $? -ne 0 ]; then
@@ -327,10 +334,10 @@ productbuild --synthesize --package "${COMPONENT_PKG}" "${DISTRIBUTION_XML}"
 
 # 3. Modify distribution.xml to include conclusion resource
 # (sed -i on macOS needs an empty string for the extension)
-sed -i '' "s|</installer-script>|<conclusion file=\"Conclusion.html\" />\n</installer-script>|" "${DISTRIBUTION_XML}"
+sed -i '' "s|</installer-gui-script>|<conclusion file=\"conclusion.html\" mime-type=\"text/html\" />\n</installer-gui-script>|" "${DISTRIBUTION_XML}"
 
 # 4. Build the final distribution package
-# This combines the component package with resources like Conclusion.html.
+# This combines the component package with resources like conclusion.html.
 FINAL_PKG="${OUTPUT_DIR}/${PKG_NAME}.pkg"
 productbuild \
     --distribution "${DISTRIBUTION_XML}" \
@@ -398,4 +405,3 @@ else
     echo "ERROR: Package build failed!"
     exit 1
 fi
-
