@@ -12,6 +12,28 @@
 set -e
 
 # -------------------------------------------------------------------
+# Parse Arguments
+# -------------------------------------------------------------------
+LOCAL_PLUGIN_DIR=""
+while [[ "$#" -gt 0 ]]; do
+    case $1 in
+        --local)
+            if [ -n "$2" ] && [ ${2:0:1} != "-" ]; then
+                LOCAL_PLUGIN_DIR="$2"
+                shift 2
+            else
+                echo "ERROR: --local requires a file path argument."
+                exit 1
+            fi
+            ;;
+        *)
+            echo "Unknown parameter passed: $1"
+            exit 1
+            ;;
+    esac
+done
+
+# -------------------------------------------------------------------
 # Configuration
 # -------------------------------------------------------------------
 PKG_NAME="ClipABit"
@@ -175,42 +197,54 @@ fi
 
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
-echo "Refreshing plugin source from GitHub..."
 rm -rf "${PLUGIN_DIR}"
-
-# Check for jq (required for parsing GitHub API response)
-if ! command -v jq &> /dev/null; then
-    echo "ERROR: 'jq' is not installed. It is required to parse GitHub API responses."
-    echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
-    exit 1
-fi
-
-if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-    echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
-    exit 1
-fi
-
-ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
-
-TEMP_DIR=$(mktemp -d)
-echo "  Downloading ${ARCHIVE_URL}..."
-if ! curl -fSL -o "${TEMP_DIR}/plugin.zip" "${ARCHIVE_URL}"; then
-    echo "ERROR: Failed to download plugin archive."
-    rm -rf "${TEMP_DIR}"
-    exit 1
-fi
-
-echo "  Extracting..."
-unzip -q "${TEMP_DIR}/plugin.zip" -d "${TEMP_DIR}"
-
-# Find the extracted folder (it will be named Resolve-Plugin-<tag>)
-EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
-
 mkdir -p "${PLUGIN_DIR}"
-# Use rsync for better handling of file copies and excludes
-rsync -av --progress "${EXTRACTED_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
-rm -rf "${TEMP_DIR}"
-echo "  Plugin downloaded and staged."
+
+if [ -n "$LOCAL_PLUGIN_DIR" ]; then
+    echo "Using local plugin source from ${LOCAL_PLUGIN_DIR}..."
+    if [ ! -d "$LOCAL_PLUGIN_DIR" ]; then
+        echo "ERROR: Local plugin directory not found: ${LOCAL_PLUGIN_DIR}"
+        exit 1
+    fi
+    rsync -av --progress "${LOCAL_PLUGIN_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
+    LATEST_TAG="local-build"
+    echo "  Local plugin staged."
+else
+    echo "Refreshing plugin source from GitHub..."
+
+    # Check for jq (required for parsing GitHub API response)
+    if ! command -v jq &> /dev/null; then
+        echo "ERROR: 'jq' is not installed. It is required to parse GitHub API responses."
+        echo "Please install it (e.g., 'brew install jq' or 'sudo apt-get install jq')."
+        exit 1
+    fi
+
+    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+        echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
+        exit 1
+    fi
+
+    ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
+
+    TEMP_DIR=$(mktemp -d)
+    echo "  Downloading ${ARCHIVE_URL}..."
+    if ! curl -fSL -o "${TEMP_DIR}/plugin.zip" "${ARCHIVE_URL}"; then
+        echo "ERROR: Failed to download plugin archive."
+        rm -rf "${TEMP_DIR}"
+        exit 1
+    fi
+
+    echo "  Extracting..."
+    unzip -q "${TEMP_DIR}/plugin.zip" -d "${TEMP_DIR}"
+
+    # Find the extracted folder (it will be named Resolve-Plugin-<tag>)
+    EXTRACTED_DIR=$(find "${TEMP_DIR}" -maxdepth 1 -type d -name "Resolve-Plugin-*" | head -n 1)
+
+    # Use rsync for better handling of file copies and excludes
+    rsync -av --progress "${EXTRACTED_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
+    rm -rf "${TEMP_DIR}"
+    echo "  Plugin downloaded and staged."
+fi
 
 # Validate plugin
 if [ ! -f "${PLUGIN_DIR}/clipabit.py" ]; then
