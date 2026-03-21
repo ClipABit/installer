@@ -1,5 +1,24 @@
 @echo off
 setlocal EnableDelayedExpansion
+
+REM Parse Arguments
+set LOCAL_PLUGIN_DIR=
+:parse_args
+if "%~1"=="" goto end_parse_args
+if "%~1"=="--local" (
+    if "%~2"=="" (
+        echo [ERROR] --local requires a file path argument.
+        exit /b 1
+    )
+    set "LOCAL_PLUGIN_DIR=%~2"
+    shift
+    shift
+    goto parse_args
+)
+echo Unknown parameter passed: %1
+exit /b 1
+:end_parse_args
+
 REM Build ClipABit Windows Installer using PyInstaller
 REM
 REM Required env vars for Auth0 config baking:
@@ -145,53 +164,66 @@ if errorlevel 1 (
 echo      Bundled Python validated
 echo.
 
-echo [4/7] Downloading plugin from GitHub...
-echo      Refreshing plugin source from GitHub...
-if exist "plugin" rd /s /q "plugin"
-
-if "%CLIPABIT_ENVIRONMENT%"=="staging" (
-    echo      Staging environment detected. Fetching latest pre-release/release metadata...
-    set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
-    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!')[0].tag_name"') do set LATEST_TAG=%%i
+if not "!LOCAL_PLUGIN_DIR!"=="" (
+    echo [4/7] Using local plugin from !LOCAL_PLUGIN_DIR!...
+    if not exist "!LOCAL_PLUGIN_DIR!" (
+        echo [ERROR] Local plugin directory not found: !LOCAL_PLUGIN_DIR!
+        pause
+        exit /b 1
+    )
+    if exist "plugin" rd /s /q "plugin"
+    mkdir "plugin"
+    xcopy "!LOCAL_PLUGIN_DIR!" "plugin\" /E /I /Y >nul
+    set LATEST_TAG=local-build
+    echo      Local plugin staged.
 ) else (
-    echo      Production environment. Fetching latest production release metadata...
-    set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
-    for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!').tag_name"') do set LATEST_TAG=%%i
+    echo [4/7] Downloading plugin from GitHub...
+    echo      Refreshing plugin source from GitHub...
+    if exist "plugin" rd /s /q "plugin"
+
+    if "%CLIPABIT_ENVIRONMENT%"=="staging" (
+        echo      Staging environment detected. Fetching latest pre-release/release metadata...
+        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases
+        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!')[0].tag_name"') do set LATEST_TAG=%%i
+    ) else (
+        echo      Production environment. Fetching latest production release metadata...
+        set API_URL=https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest
+        for /f "delims=" %%i in ('powershell -Command "(Invoke-RestMethod -Uri '!API_URL!').tag_name"') do set LATEST_TAG=%%i
+    )
+
+    if "!LATEST_TAG!"=="" (
+        echo [ERROR] Could not fetch release tag from GitHub API:
+        echo !API_URL!
+        pause
+        exit /b 1
+    )
+
+    echo      Latest release: !LATEST_TAG!
+    set ARCHIVE_URL=https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/!LATEST_TAG!.zip
+
+    echo      Downloading !ARCHIVE_URL!...
+    curl -fSL -o "%TEMP%\plugin.zip" "!ARCHIVE_URL!"
+    if errorlevel 1 (
+        echo [ERROR] Failed to download plugin archive.
+        pause
+        exit /b 1
+    )
+
+    echo      Extracting...
+    REM Clean any stale extractions in TEMP
+    for /d %%d in ("%TEMP%\Resolve-Plugin-*") do rd /s /q "%%d"
+    tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
+
+    REM Find the extracted folder and copy its contents
+    for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
+        xcopy "%%d" "plugin\" /E /I /Y >nul
+        rd /s /q "%%d"
+        goto :plugin_copied
+    )
+    :plugin_copied
+    del "%TEMP%\plugin.zip" >nul 2>&1
+    echo      Plugin downloaded and staged.
 )
-
-if "!LATEST_TAG!"=="" (
-    echo [ERROR] Could not fetch release tag from GitHub API:
-    echo !API_URL!
-    pause
-    exit /b 1
-)
-
-echo      Latest release: !LATEST_TAG!
-set ARCHIVE_URL=https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/!LATEST_TAG!.zip
-      
-echo      Downloading !ARCHIVE_URL!...
-curl -fSL -o "%TEMP%\plugin.zip" "!ARCHIVE_URL!"
-if errorlevel 1 (
-    echo [ERROR] Failed to download plugin archive.
-    pause
-    exit /b 1
-)
-
-echo      Extracting...
-REM Clean any stale extractions in TEMP
-for /d %%d in ("%TEMP%\Resolve-Plugin-*") do rd /s /q "%%d"
-tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
-
-REM Find the extracted folder and copy its contents
-for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
-    xcopy "%%d" "plugin\" /E /I /Y >nul
-    rd /s /q "%%d"
-    goto :plugin_copied
-)
-:plugin_copied
-del "%TEMP%\plugin.zip" >nul 2>&1
-echo      Plugin downloaded and staged.
-
 REM Validate full plugin structure
 if not exist "plugin\clipabit.py" (
     echo [ERROR] plugin\clipabit.py missing.
