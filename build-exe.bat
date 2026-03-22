@@ -71,7 +71,7 @@ set PYTHON_SHA256=6f194e1ede02260fd3d758893bbf1d3bb4084652d436a8300a229da721c3dd
 REM -------------------------------------------------------------------
 
 REM Check if Python is installed (for build tooling — not the bundled runtime)
-python --version >nul 2>&1
+python --version 
 if errorlevel 1 (
     echo [ERROR] Python is not installed or not in PATH
     echo.
@@ -90,8 +90,8 @@ if errorlevel 1 (
 
 echo.
 echo [2/7] Installing build dependencies...
-python -m pip install --upgrade pip >nul 2>&1
-python -m pip install pyinstaller==6.16.0 >nul 2>&1
+python -m pip install --upgrade pip
+python -m pip install pyinstaller==6.16.0
 if errorlevel 1 (
     echo [ERROR] Failed to install build dependencies
     pause
@@ -123,7 +123,7 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
     set "ACTUAL_SHA256=!ACTUAL_SHA256: =!"
     if /i not "!ACTUAL_SHA256!"=="%PYTHON_SHA256%" (
         echo [ERROR] SHA256 mismatch!
-        del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" >nul 2>&1
+        del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" 
         pause
         exit /b 1
     )
@@ -131,12 +131,12 @@ if not exist "%PYTHON_CACHE_DIR%\python\python.exe" (
 
     echo      Extracting...
     tar xzf "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" -C "%PYTHON_CACHE_DIR%"
-    del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" >nul 2>&1
+    del "%PYTHON_CACHE_DIR%\!PYTHON_ARCHIVE!" 
 ) else (
     echo      Using cached Python from %PYTHON_CACHE_DIR%\python
 )
 
-"%PYTHON_CACHE_DIR%\python\python.exe" --version >nul 2>&1
+"%PYTHON_CACHE_DIR%\python\python.exe" --version 
 if errorlevel 1 (
     echo [ERROR] Bundled Python validation failed
     pause
@@ -184,12 +184,12 @@ tar xzf "%TEMP%\plugin.zip" -C "%TEMP%"
 
 REM Find the extracted folder and copy its contents
 for /d %%d in ("%TEMP%\Resolve-Plugin-*") do (
-    xcopy "%%d" "plugin\" /E /I /Y >nul
+    xcopy "%%d" "plugin\" /E /I /Y 
     rd /s /q "%%d"
     goto :plugin_copied
 )
 :plugin_copied
-del "%TEMP%\plugin.zip" >nul 2>&1
+del "%TEMP%\plugin.zip" 
 echo      Plugin downloaded and staged.
 
 REM Validate full plugin structure
@@ -219,11 +219,11 @@ echo.
 echo [5/7] Preparing installer script...
 REM Template Auth0 values into installer-script.py using PowerShell
 REM This mirrors the 'sed' behavior in build-pkg.sh to bake credentials into the binary.
-copy /y "installer-script.py" "installer-script.py.bak" >nul
+copy /y "installer-script.py" "installer-script.py.bak" 
 powershell -Command "(Get-Content installer-script.py) -replace 'os.environ.get\(\"CLIPABIT_AUTH0_DOMAIN\", \"\"\)', '\"%CLIPABIT_AUTH0_DOMAIN%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_CLIENT_ID\", \"\"\)', '\"%CLIPABIT_AUTH0_CLIENT_ID%\"' -replace 'os.environ.get\(\"CLIPABIT_AUTH0_AUDIENCE\", \"\"\)', '\"%CLIPABIT_AUTH0_AUDIENCE%\"' -replace 'os.environ.get\(\"CLIPABIT_ENVIRONMENT\", \"prod\"\)', '\"%CLIPABIT_ENVIRONMENT%\"' | Set-Content installer-script.py"
 if errorlevel 1 (
     echo [ERROR] Failed to template installer-script.py
-    move /y "installer-script.py.bak" "installer-script.py" >nul
+    move /y "installer-script.py.bak" "installer-script.py" 
     pause
     exit /b 1
 )
@@ -242,14 +242,14 @@ if errorlevel 1 (
     exit /b 1
 )
 
-"%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r "%TEMP_REQS%" >nul 2>&1
+"%PYTHON_CACHE_DIR%\python\python.exe" -m pip install --dry-run --only-binary=:all: --target "%TEMP%\wheel-check" -r "%TEMP_REQS%"
 if errorlevel 1 (
     echo [ERROR] Not all dependencies have binary wheels available.
-    del "%TEMP_REQS%" >nul 2>&1
+    del "%TEMP_REQS%" 
     pause
     exit /b 1
 )
-del "%TEMP_REQS%" >nul 2>&1
+del "%TEMP_REQS%" 
 echo      All dependencies have binary wheels
 
 echo.
@@ -257,12 +257,12 @@ echo [7/7] Building Windows executable...
 echo      Baking plugin release: %LATEST_TAG%
 REM Create release.json for metadata (read by installer-script.py)
 echo {"tag": "%LATEST_TAG%", "environment": "%CLIPABIT_ENVIRONMENT%"} > release.json
-pyinstaller clipabit-installer.spec
+python -m PyInstaller clipabit-installer.spec
 set BUILD_EXIT_CODE=%errorlevel%
 
 REM Always restore installer-script.py from backup
 if exist "installer-script.py.bak" (
-    move /y "installer-script.py.bak" "installer-script.py" >nul
+    move /y "installer-script.py.bak" "installer-script.py" 
 )
 
 if %BUILD_EXIT_CODE% neq 0 (
