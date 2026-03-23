@@ -1,0 +1,181 @@
+name: Build Installers (Reusable)
+
+on:
+  workflow_call:
+    inputs:
+      resolve_plugin_tag:
+        description: "Resolve-Plugin tag to build from (empty = latest)"
+        type: string
+        required: false
+        default: ""
+      artifact_retention_days:
+        description: "Days to retain installer artifacts"
+        type: number
+        required: false
+        default: 7
+      environment:
+        description: "Target environment (dev, staging, prod)"
+        type: string
+        required: false
+        default: "prod"
+    secrets:
+      CLIPABIT_AUTH0_DOMAIN:
+        required: true
+      CLIPABIT_AUTH0_CLIENT_ID:
+        required: true
+      CLIPABIT_AUTH0_AUDIENCE:
+        required: true
+
+jobs:
+  # ============================================================================
+  # Download plugin files (shared across build jobs)
+  # ============================================================================
+  prepare-plugin:
+    name: Download Plugin
+    runs-on: ubuntu-latest
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+
+      - name: Set up Python
+        run: uv python install 3.13
+
+      - name: Download plugin
+        run: |
+          ARGS="--download-only --staging-dir ."
+          if [ -n "${{ inputs.resolve_plugin_tag }}" ]; then
+            ARGS="$ARGS --tag ${{ inputs.resolve_plugin_tag }}"
+          fi
+          uv run installer-script.py $ARGS
+
+      - name: Upload plugin artifact
+        uses: actions/upload-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+          retention-days: 1
+
+  # ============================================================================
+  # Build macOS installer
+  # ============================================================================
+  build-macos:
+    name: Build macOS Installer
+    runs-on: macos-latest
+    needs: prepare-plugin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-suffix: "installer-build"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Cache bundled Python
+        uses: actions/cache@v4
+        with:
+          path: build/python
+          key: ${{ runner.os }}-python-3.11.12-20250529
+          restore-keys: |
+            ${{ runner.os }}-python-3.11
+
+      - name: Make scripts executable
+        run: |
+          chmod +x build-pkg.sh post-install-scripts/postinstall
+
+      - name: Build macOS package
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          ./build-pkg.sh
+
+      - name: Verify .pkg was created
+        run: |
+          if [ ! -f dist/ClipABit.pkg ]; then
+            echo "ERROR: ClipABit.pkg not found in dist/"
+            exit 1
+          fi
+          ls -lh dist/ClipABit.pkg
+
+      - name: Upload macOS installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-macOS
+          path: dist/ClipABit.pkg
+          retention-days: ${{ inputs.artifact_retention_days }}
+
+  # ============================================================================
+  # Build Windows installer
+  # ============================================================================
+  build-windows:
+    name: Build Windows Installer
+    runs-on: windows-latest
+    needs: prepare-plugin
+
+    steps:
+      - name: Checkout repository
+        uses: actions/checkout@v4
+
+      - name: Download plugin artifact
+        uses: actions/download-artifact@v4
+        with:
+          name: plugin-files
+          path: plugin/
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v6
+        with:
+          enable-cache: true
+          cache-suffix: "installer-build"
+
+      - name: Set up Python
+        run: uv python install 3.12
+
+      - name: Cache bundled Python
+        uses: actions/cache@v4
+        with:
+          path: build/python
+          key: ${{ runner.os }}-python-3.11.12-20250529
+          restore-keys: |
+            ${{ runner.os }}-python-3.11
+
+      - name: Build Windows executable
+        env:
+          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
+          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
+          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
+          CLIPABIT_ENVIRONMENT: ${{ inputs.environment }}
+        run: |
+          .\build-exe.bat
+
+      - name: Verify .exe was created
+        run: |
+          if (!(Test-Path "dist/ClipABit-Installer.exe")) {
+            throw "ERROR: ClipABit-Installer.exe not found in dist/"
+          }
+          Get-Item dist/ClipABit-Installer.exe | Format-List
+
+      - name: Upload Windows installer
+        uses: actions/upload-artifact@v4
+        with:
+          name: ClipABit-Installer-Windows
+          path: dist/ClipABit-Installer.exe
+          retention-days: ${{ inputs.artifact_retention_days }}
