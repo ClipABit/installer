@@ -79,156 +79,13 @@ jobs:
         continue-on-error: true
 
   # ============================================================================
-  # Download plugin for build jobs (shared step)
+  # Build installers (calls reusable workflow)
   # ============================================================================
-  prepare-plugin:
-    name: Download Plugin
-    runs-on: ubuntu-latest
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-
-      - name: Set up Python
-        run: uv python install 3.13
-
-      - name: Download latest plugin release
-        run: |
-          uv run installer-script.py --download-only --staging-dir .
-
-      - name: Upload plugin artifact
-        uses: actions/upload-artifact@v4
-        with:
-          name: plugin-files
-          path: plugin/
-          retention-days: 1
-
-  # ============================================================================
-  # Build macOS installer
-  # ============================================================================
-  build-macos:
-    name: Build macOS Installer
-    runs-on: macos-latest
-    needs: [test, prepare-plugin]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download plugin artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: plugin-files
-          path: plugin/
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          cache-suffix: "installer-build"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Cache bundled Python
-        uses: actions/cache@v4
-        with:
-          path: build/python
-          key: ${{ runner.os }}-python-3.11.12-20250529
-          restore-keys: |
-            ${{ runner.os }}-python-3.11
-
-      - name: Make scripts executable
-        run: |
-          chmod +x build-pkg.sh post-install-scripts/postinstall
-
-      - name: Build macOS package
-        env:
-          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
-          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
-          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
-          CLIPABIT_ENVIRONMENT: "prod"
-        run: |
-          ./build-pkg.sh
-
-      - name: Verify .pkg was created
-        run: |
-          if [ ! -f dist/ClipABit.pkg ]; then
-            echo "ERROR: ClipABit.pkg not found in dist/"
-            exit 1
-          fi
-          ls -lh dist/ClipABit.pkg
-          echo "✅ macOS installer built successfully"
-
-      - name: Upload macOS installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: ClipABit-Installer-macOS-${{ github.sha }}
-          path: dist/ClipABit.pkg
-          retention-days: 7
-
-  # ============================================================================
-  # Build Windows installer
-  # ============================================================================
-  build-windows:
-    name: Build Windows Installer
-    runs-on: windows-latest
-    needs: [test, prepare-plugin]
-
-    steps:
-      - name: Checkout repository
-        uses: actions/checkout@v4
-
-      - name: Download plugin artifact
-        uses: actions/download-artifact@v4
-        with:
-          name: plugin-files
-          path: plugin/
-
-      - name: Install uv
-        uses: astral-sh/setup-uv@v6
-        with:
-          enable-cache: true
-          cache-suffix: "installer-build"
-
-      - name: Set up Python
-        run: uv python install 3.12
-
-      - name: Cache bundled Python
-        uses: actions/cache@v4
-        with:
-          path: build/python
-          key: ${{ runner.os }}-python-3.11.12-20250529
-          restore-keys: |
-            ${{ runner.os }}-python-3.11
-
-      - name: Build Windows executable
-        env:
-          CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
-          CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
-          CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
-          CLIPABIT_ENVIRONMENT: "prod"
-        run: |
-          # Run the build script
-          .\build-exe.bat
-
-      - name: Verify .exe was created
-        run: |
-          if (!(Test-Path "dist/ClipABit-Installer.exe")) {
-            throw "ERROR: ClipABit-Installer.exe not found in dist/"
-          }
-          Get-Item dist/ClipABit-Installer.exe | Format-List
-          Write-Host "✅ Windows installer built successfully"
-
-      - name: Upload Windows installer
-        uses: actions/upload-artifact@v4
-        with:
-          name: ClipABit-Installer-Windows-${{ github.sha }}
-          path: dist/ClipABit-Installer.exe
-          retention-days: 7
+  build:
+    name: Build Installers
+    needs: [test]
+    uses: ./.github/workflows/build_installers.yml
+    secrets: inherit
 
   # ============================================================================
   # Security scan
@@ -278,7 +135,7 @@ jobs:
   # ============================================================================
   ci-success:
     name: CI Success
-    needs: [test, lint, build-macos, build-windows]
+    needs: [test, lint, build]
     runs-on: ubuntu-latest
     if: always()
 
@@ -289,12 +146,8 @@ jobs:
             echo "❌ Tests failed"
             exit 1
           fi
-          if [ "${{ needs.build-macos.result }}" != "success" ]; then
-            echo "❌ macOS build failed"
-            exit 1
-          fi
-          if [ "${{ needs.build-windows.result }}" != "success" ]; then
-            echo "❌ Windows build failed"
+          if [ "${{ needs.build.result }}" != "success" ]; then
+            echo "❌ Build failed"
             exit 1
           fi
           echo "✅ All CI checks passed!"
