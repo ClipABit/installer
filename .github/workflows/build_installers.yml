@@ -45,10 +45,12 @@ jobs:
         run: uv python install 3.13
 
       - name: Download plugin
+        env:
+          PLUGIN_TAG: ${{ inputs.resolve_plugin_tag }}
         run: |
           ARGS="--download-only --staging-dir ."
-          if [ -n "${{ inputs.resolve_plugin_tag }}" ]; then
-            ARGS="$ARGS --tag ${{ inputs.resolve_plugin_tag }}"
+          if [ -n "$PLUGIN_TAG" ]; then
+            ARGS="$ARGS --tag $PLUGIN_TAG"
           fi
           uv run installer-script.py $ARGS
 
