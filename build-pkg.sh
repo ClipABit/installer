@@ -184,7 +184,7 @@ echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
     echo "  Staging environment detected. Fetching latest pre-release/release metadata..."
     API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
-    LATEST_TAG=$(curl -s "$API_URL" | jq -r '.[0].tag_name')
+    LATEST_TAG=$(curl -s "$API_URL" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
 elif [ "$CLIPABIT_ENVIRONMENT" = "prod" ]; then
     echo "  Production environment. Fetching latest production release metadata..."
     API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
