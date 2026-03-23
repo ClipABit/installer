@@ -1,0 +1,46 @@
+name: CD
+
+on:
+  workflow_dispatch:
+    inputs:
+      resolve_plugin_tag:
+        description: "Optional Resolve-Plugin tag to build from (example: v1.2.3)"
+        required: false
+        type: string
+  repository_dispatch:
+    types: [resolve_plugin_release]
+  release:
+    types: [created, published]
+
+jobs:
+  build:
+    name: Build Installers
+    uses: ./.github/workflows/build_installers.yml
+    with:
+      resolve_plugin_tag: ${{ inputs.resolve_plugin_tag || github.event.client_payload.release_tag || '' }}
+      artifact_retention_days: 30
+    secrets: inherit
+
+  create-release:
+    name: Create Release
+    needs: [build]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main'
+    steps:
+      - name: Download all artifacts
+        uses: actions/download-artifact@v4
+        with:
+          path: artifacts
+
+      - name: Create Release
+        uses: softprops/action-gh-release@v1
+        with:
+          tag_name: v${{ github.run_number }}
+          name: Release v${{ github.run_number }}
+          files: |
+            artifacts/ClipABit-Installer-macOS/ClipABit.pkg
+            artifacts/ClipABit-Installer-Windows/ClipABit-Installer.exe
+          draft: false
+          prerelease: false
+        env:
+          GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
