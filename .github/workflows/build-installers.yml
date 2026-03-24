@@ -256,3 +256,63 @@ jobs:
           prerelease: false
         env:
           GITHUB_TOKEN: ${{ secrets.GITHUB_TOKEN }}
+
+  notify-product-page:
+    name: Notify Product Page Repo
+    needs: [create-release]
+    runs-on: ubuntu-latest
+    if: github.ref == 'refs/heads/main' && needs.create-release.result == 'success'
+
+    steps:
+      - name: Resolve plugin tag for dispatch payload
+        id: resolve_tag
+        env:
+          DISPATCH_TAG: ${{ github.event.client_payload.release_tag }}
+          INPUT_TAG: ${{ github.event.inputs.resolve_plugin_tag }}
+        run: |
+          TARGET_TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
+          if [ -z "$TARGET_TAG" ]; then
+            TARGET_TAG=$(curl --fail -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            if [ -z "$TARGET_TAG" ]; then
+              echo "ERROR: Failed to resolve Resolve-Plugin tag"
+              exit 1
+            fi
+          fi
+          echo "resolve_plugin_tag=$TARGET_TAG" >> "$GITHUB_OUTPUT"
+
+      - name: Dispatch release event to product page repo
+        uses: actions/github-script@v7
+        env:
+          TARGET_REPO: ClipABit/clipabit-product-page
+          SOURCE_RELEASE_TAG: v${{ github.run_number }}
+          RESOLVE_PLUGIN_TAG: ${{ steps.resolve_tag.outputs.resolve_plugin_tag }}
+        with:
+          github-token: ${{ secrets.WEBSITE_DISPATCH_TOKEN }}
+          script: |
+            const [owner, repo] = process.env.TARGET_REPO.split("/");
+            if (!owner || !repo) {
+              core.setFailed(`Invalid TARGET_REPO value: ${process.env.TARGET_REPO}`);
+              return;
+            }
+
+            const payload = {
+              source_owner: context.repo.owner,
+              source_repo: context.repo.repo,
+              source_workflow: context.workflow,
+              source_run_id: String(context.runId),
+              source_run_number: String(context.runNumber),
+              source_sha: context.sha,
+              source_ref: context.ref,
+              source_release_tag: process.env.SOURCE_RELEASE_TAG,
+              resolve_plugin_tag: process.env.RESOLVE_PLUGIN_TAG,
+              release_tag: process.env.RESOLVE_PLUGIN_TAG
+            };
+
+            await github.rest.repos.createDispatchEvent({
+              owner,
+              repo,
+              event_type: "installer-release",
+              client_payload: payload
+            });
+
+            core.notice(`Dispatched installer-release to ${owner}/${repo} with resolve_plugin_tag=${process.env.RESOLVE_PLUGIN_TAG}`);
