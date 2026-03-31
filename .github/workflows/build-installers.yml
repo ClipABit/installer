@@ -112,7 +112,7 @@ jobs:
           CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
           CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
         run: |
-          ./build-pkg.sh
+          ./build-pkg.sh --local plugin
 
       - name: Upload macOS installer
         uses: actions/upload-artifact@v4
