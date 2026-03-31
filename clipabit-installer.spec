@@ -14,7 +14,8 @@ from pathlib import Path
 
 block_cipher = None
 
-ROOT = Path(__file__).resolve().parent
+SPEC_FILE = globals().get('__file__', 'clipabit-installer.spec')
+ROOT = Path(SPEC_FILE).resolve().parent
 BUILD_DIR = ROOT / 'build'
 
 
