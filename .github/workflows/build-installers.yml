@@ -107,6 +107,7 @@ jobs:
 
       - name: Build macOS package
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           CLIPABIT_AUTH0_DOMAIN: ${{ secrets.CLIPABIT_AUTH0_DOMAIN }}
           CLIPABIT_AUTH0_CLIENT_ID: ${{ secrets.CLIPABIT_AUTH0_CLIENT_ID }}
           CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
