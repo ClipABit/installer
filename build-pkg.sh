@@ -179,22 +179,6 @@ echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 # -------------------------------------------------------------------
 # Plugin retrieval
 # -------------------------------------------------------------------
-# Fetch the latest release tag metadata if in staging/prod environment.
-# This ensures even local builds are correctly labeled with the tag they represent.
-if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
-    echo "  Staging environment detected. Fetching latest pre-release/release metadata..."
-    API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
-    LATEST_TAG=$(curl -s "$API_URL" | jq -r '[.[] | select(.prerelease == true)][0].tag_name')
-elif [ "$CLIPABIT_ENVIRONMENT" = "prod" ]; then
-    echo "  Production environment. Fetching latest production release metadata..."
-    API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
-    LATEST_TAG=$(curl -s "$API_URL" | jq -r '.tag_name')
-fi
-
-if [ -n "$LATEST_TAG" ] && [ "$LATEST_TAG" != "null" ]; then
-    echo "  Latest release tag: ${LATEST_TAG}"
-fi
-
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
 rm -rf "${PLUGIN_DIR}"
@@ -219,10 +203,56 @@ else
         exit 1
     fi
 
-    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
-        echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
+    if [ "$CLIPABIT_ENVIRONMENT" = "staging" ]; then
+        echo "  Staging environment detected. Fetching latest pre-release/release metadata..."
+        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases"
+        TAG_FILTER='[.[] | select(.prerelease == true)][0].tag_name'
+    elif [ "$CLIPABIT_ENVIRONMENT" = "prod" ]; then
+        echo "  Production environment. Fetching latest production release metadata..."
+        API_URL="https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest"
+        TAG_FILTER='.tag_name'
+    else
+        echo "ERROR: Unsupported CLIPABIT_ENVIRONMENT='${CLIPABIT_ENVIRONMENT}'. Expected 'prod' or 'staging'."
         exit 1
     fi
+
+    API_RESPONSE_FILE=$(mktemp)
+    CURL_AUTH_ARGS=()
+    if [ -n "${GITHUB_TOKEN}" ]; then
+        CURL_AUTH_ARGS=(-H "Authorization: Bearer ${GITHUB_TOKEN}")
+    fi
+
+    if ! curl --fail --silent --show-error --retry 3 --retry-delay 2 --retry-connrefused \
+        "${CURL_AUTH_ARGS[@]}" "$API_URL" -o "$API_RESPONSE_FILE"; then
+        rm -f "$API_RESPONSE_FILE"
+
+        # Fallback for prod: resolve the latest tag from the GitHub releases redirect.
+        # This avoids API rate-limit failures (403) on unauthenticated runners.
+        if [ "$CLIPABIT_ENVIRONMENT" = "prod" ]; then
+            echo "  GitHub API request failed. Falling back to releases/latest redirect..."
+            REDIRECT_TAG=$(curl --fail --silent --show-error --location --write-out '%{url_effective}' --output /dev/null \
+                "https://github.com/ClipABit/Resolve-Plugin/releases/latest" | sed -E 's#.*/tag/##')
+            if [ -n "$REDIRECT_TAG" ] && [ "$REDIRECT_TAG" != "latest" ]; then
+                LATEST_TAG="$REDIRECT_TAG"
+            else
+                echo "ERROR: Failed to fetch release metadata from GitHub API: $API_URL"
+                exit 1
+            fi
+        else
+            echo "ERROR: Failed to fetch release metadata from GitHub API: $API_URL"
+            exit 1
+        fi
+    else
+        LATEST_TAG=$(jq -r "$TAG_FILTER" "$API_RESPONSE_FILE")
+        rm -f "$API_RESPONSE_FILE"
+    fi
+
+    if [ -z "$LATEST_TAG" ] || [ "$LATEST_TAG" = "null" ]; then
+        echo "ERROR: Could not fetch release tag from GitHub API: $API_URL"
+        echo "Hint: this can happen due to GitHub API rate limiting."
+        exit 1
+    fi
+    echo "  Latest release tag: ${LATEST_TAG}"
 
     ARCHIVE_URL="https://github.com/ClipABit/Resolve-Plugin/archive/refs/tags/${LATEST_TAG}.zip"
 
