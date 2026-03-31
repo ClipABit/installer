@@ -23,12 +23,17 @@ jobs:
 
       - name: Pull Resolve-Plugin repository (latest release)
         env:
+          GITHUB_TOKEN: ${{ github.token }}
           DISPATCH_TAG: ${{ github.event.client_payload.release_tag }}
           INPUT_TAG: ${{ github.event.inputs.resolve_plugin_tag }}
         run: |
           TARGET_TAG="${DISPATCH_TAG:-${INPUT_TAG:-}}"
           if [ -z "$TARGET_TAG" ]; then
-            TARGET_TAG=$(curl --fail -s https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest | grep '"tag_name":' | sed -E 's/.*"([^"]+)".*/\1/')
+            TARGET_TAG=$(curl --fail --silent --show-error --retry 3 --retry-delay 2 \
+              -H "Authorization: Bearer ${GITHUB_TOKEN}" \
+              -H "Accept: application/vnd.github+json" \
+              https://api.github.com/repos/ClipABit/Resolve-Plugin/releases/latest \
+              | python3 -c 'import json,sys; print((json.load(sys.stdin) or {}).get("tag_name", ""))')
             if [ -z "$TARGET_TAG" ]; then
               echo "ERROR: Failed to fetch latest release tag from GitHub API"
               exit 1
