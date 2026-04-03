@@ -171,9 +171,18 @@ if not "!LOCAL_PLUGIN_DIR!"=="" (
         pause
         exit /b 1
     )
-    if exist "plugin" rd /s /q "plugin"
-    mkdir "plugin"
-    xcopy "!LOCAL_PLUGIN_DIR!" "plugin\" /E /I /Y >nul
+    REM Resolve to absolute path before any cleanup
+    pushd "!LOCAL_PLUGIN_DIR!"
+    set "LOCAL_PLUGIN_ABS=!CD!"
+    popd
+    REM Only clean + re-copy if source differs from destination
+    if /i not "!LOCAL_PLUGIN_ABS!"=="%CD%\plugin" (
+        if exist "plugin" rd /s /q "plugin"
+        mkdir "plugin"
+        xcopy "!LOCAL_PLUGIN_ABS!" "plugin\" /E /I /Y >nul
+    ) else (
+        echo      Local plugin dir is already the target dir — skipping copy.
+    )
     set LATEST_TAG=local-build
     echo      Local plugin staged.
 ) else (

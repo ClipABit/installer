@@ -229,7 +229,15 @@ jobs:
           CLIPABIT_AUTH0_AUDIENCE: ${{ secrets.CLIPABIT_AUTH0_AUDIENCE }}
           CLIPABIT_ENVIRONMENT: ${{ secrets.CLIPABIT_ENVIRONMENT || 'prod' }}
         run: |
+          Copy-Item -Path installer-script.py -Destination installer-script.py.bak -Force
+          (Get-Content installer-script.py) `
+            -replace 'os\.environ\.get\("CLIPABIT_AUTH0_DOMAIN", ""\)', """$env:CLIPABIT_AUTH0_DOMAIN""" `
+            -replace 'os\.environ\.get\("CLIPABIT_AUTH0_CLIENT_ID", ""\)', """$env:CLIPABIT_AUTH0_CLIENT_ID""" `
+            -replace 'os\.environ\.get\("CLIPABIT_AUTH0_AUDIENCE", ""\)', """$env:CLIPABIT_AUTH0_AUDIENCE""" `
+            -replace 'os\.environ\.get\("CLIPABIT_ENVIRONMENT", "prod"\)', """$env:CLIPABIT_ENVIRONMENT""" |
+            Set-Content installer-script.py
           pyinstaller clipabit-installer.spec
+          Move-Item -Path installer-script.py.bak -Destination installer-script.py -Force
 
       - name: Upload Windows installer
         uses: actions/upload-artifact@v4

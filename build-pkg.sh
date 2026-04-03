@@ -181,19 +181,24 @@ echo "  pip: $("${BUNDLED_PYTHON}" -m pip --version 2>&1)"
 # -------------------------------------------------------------------
 PLUGIN_DIR="${SCRIPT_DIR}/plugin"
 
-rm -rf "${PLUGIN_DIR}"
-mkdir -p "${PLUGIN_DIR}"
-
 if [ -n "$LOCAL_PLUGIN_DIR" ]; then
+    # Resolve to absolute path before any cleanup
+    LOCAL_PLUGIN_DIR="$(cd "$LOCAL_PLUGIN_DIR" && pwd)"
     echo "Using local plugin source from ${LOCAL_PLUGIN_DIR}..."
-    if [ ! -d "$LOCAL_PLUGIN_DIR" ]; then
-        echo "ERROR: Local plugin directory not found: ${LOCAL_PLUGIN_DIR}"
-        exit 1
+
+    # Only clean + re-copy if source differs from destination
+    if [ "$LOCAL_PLUGIN_DIR" != "$PLUGIN_DIR" ]; then
+        rm -rf "${PLUGIN_DIR}"
+        mkdir -p "${PLUGIN_DIR}"
+        rsync -av --progress "${LOCAL_PLUGIN_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
+    else
+        echo "  Local plugin dir is already the target dir — skipping copy."
     fi
-    rsync -av --progress "${LOCAL_PLUGIN_DIR}/" "${PLUGIN_DIR}/" --exclude ".git"
     LATEST_TAG="local-build"
     echo "  Local plugin staged."
 else
+    rm -rf "${PLUGIN_DIR}"
+    mkdir -p "${PLUGIN_DIR}"
     echo "Refreshing plugin source from GitHub..."
 
     # Check for jq (required for parsing GitHub API response)
