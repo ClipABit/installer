@@ -751,6 +751,10 @@ def install_plugin(plugin_dir: Path, skip_checks: bool = False,
             shutil.rmtree(pkg_target)
         modules_dir.mkdir(parents=True, exist_ok=True)
         shutil.copytree(pkg_source, pkg_target)
+        
+        # Copy pyproject.toml inside the package so version tracking works
+        shutil.copy2(plugin_dir / "pyproject.toml", pkg_target / "pyproject.toml")
+        
         print_success(f"Plugin package installed: {pkg_target}")
 
         # --- Write config ---

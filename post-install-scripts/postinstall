@@ -273,6 +273,8 @@ echo "  Dependencies installed: $DEPS_DIR"
 # -------------------------------------------------------------------
 echo "Installing ClipABit plugin files..."
 sudo -u "$CURRENT_USER" cp -R "${PLUGIN_SOURCE}/clipabit" "$MODULES_DIR/clipabit"
+# Also copy pyproject.toml inside the package for version tracking
+sudo -u "$CURRENT_USER" cp "${PLUGIN_SOURCE}/pyproject.toml" "$MODULES_DIR/clipabit/pyproject.toml"
 chown -R "$CURRENT_USER:staff" "$MODULES_DIR/clipabit"
 
 # Validate
