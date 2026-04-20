@@ -884,11 +884,226 @@ def verify_installation(plugin_dir: Path | None = None, scripts_dir=None,
 
 
 # ---------------------------------------------------------------------------
+# Uninstall logic
+# ---------------------------------------------------------------------------
+
+def get_dir_size(path: Path) -> int:
+    """Return total size of a directory in bytes."""
+    total = 0
+    try:
+        for f in path.rglob("*"):
+            if f.is_file():
+                total += f.stat().st_size
+    except OSError:
+        pass
+    return total
+
+
+def format_size(size_bytes: int) -> str:
+    """Format bytes as human-readable string."""
+    if size_bytes < 1024:
+        return f"{size_bytes} B"
+    elif size_bytes < 1024 * 1024:
+        return f"{size_bytes / 1024:.1f} KB"
+    else:
+        return f"{size_bytes / (1024 * 1024):.1f} MB"
+
+
+def enumerate_installed_paths(scripts_dir=None, modules_dir=None,
+                               config_dir=None, clipabit_dir=None):
+    """Return a list of (path, is_dir, description) for all installed artifacts."""
+    scripts_dir, modules_dir = get_resolve_directories(scripts_dir, modules_dir)
+    config_dir = get_config_directory(override=config_dir)
+    clipabit_dir = get_clipabit_directory(override=clipabit_dir)
+
+    paths = [
+        (scripts_dir / "ClipABit.py", False, "Bootstrap shim"),
+        (modules_dir / "clipabit", True, "Plugin package"),
+        (clipabit_dir / "python", True, "Python runtime"),
+        (clipabit_dir / "deps", True, "Dependencies"),
+        (config_dir / "config.dat", False, "Configuration"),
+    ]
+
+    # Also check for .bak variants
+    for path, is_dir, desc in list(paths):
+        bak = Path(str(path) + ".bak")
+        if bak.exists():
+            paths.append((bak, is_dir or bak.is_dir(), f"{desc} (backup)"))
+
+    return [(p, d, desc) for p, d, desc in paths if p.exists()]
+
+
+def clear_keyring():
+    """Attempt to clear ClipABit keyring credentials.
+
+    Tries platform-native commands since the bundled Python/deps may already
+    be deleted by the time this runs.
+    """
+    system = platform.system()
+    try:
+        if system == "Darwin":
+            result = subprocess.run(
+                ["security", "delete-generic-password",
+                 "-s", "clipabit-plugin", "-a", "tokens"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print_success("Keychain credentials removed.")
+            else:
+                if "could not be found" in result.stderr.lower():
+                    print_info("No keychain credentials found.")
+                else:
+                    print_warning(f"Keychain cleanup: {result.stderr.strip()}")
+        elif system == "Windows":
+            result = subprocess.run(
+                ["cmdkey", "/delete:clipabit-plugin"],
+                capture_output=True, text=True,
+            )
+            if result.returncode == 0:
+                print_success("Credential Manager entry removed.")
+            else:
+                print_info("No Credential Manager entry found.")
+    except FileNotFoundError:
+        print_warning("Could not clear keyring (command not found).")
+
+
+def forget_pkg_receipt():
+    """Remove the macOS installer pkg receipt."""
+    if platform.system() != "Darwin":
+        return
+    try:
+        result = subprocess.run(
+            ["pkgutil", "--forget", "com.clipabit.plugin.installer"],
+            capture_output=True, text=True,
+        )
+        if result.returncode == 0:
+            print_success("Package receipt removed.")
+        else:
+            print_info("No package receipt found.")
+    except FileNotFoundError:
+        pass
+
+
+def uninstall(yes: bool = False, scripts_dir=None, modules_dir=None,
+              config_dir=None, clipabit_dir=None) -> bool:
+    """Uninstall ClipABit from the current system.
+
+    All path parameters accept overrides for testability.
+    Returns True if uninstall completed, False otherwise.
+    """
+    print_header("ClipABit Uninstaller")
+
+    # Check if Resolve is running
+    resolve_running = check_resolve_running()
+    if resolve_running:
+        print_warning("Please close DaVinci Resolve before uninstalling.")
+        if not yes:
+            response = input("\n  Continue anyway? [y/N]: ").strip().lower()
+            if response not in ("y", "yes"):
+                print_info("Uninstall cancelled.")
+                return False
+
+    # Enumerate what exists
+    installed = enumerate_installed_paths(scripts_dir, modules_dir,
+                                          config_dir, clipabit_dir)
+
+    if not installed:
+        print_info("No ClipABit installation found. Nothing to remove.")
+        return True
+
+    # Display summary
+    print_info("The following will be removed:\n")
+    total_size = 0
+    for path, is_dir, desc in installed:
+        if is_dir:
+            size = get_dir_size(path)
+        else:
+            try:
+                size = path.stat().st_size
+            except OSError:
+                size = 0
+        total_size += size
+        print(f"    {desc}: {path} ({format_size(size)})")
+    print(f"\n    Total: {format_size(total_size)}")
+    print()
+    print_info("Keyring credentials (clipabit-plugin) will also be cleared.")
+    if platform.system() == "Darwin":
+        print_info("Package receipt (com.clipabit.plugin.installer) will be removed.")
+
+    # Confirmation
+    if not yes:
+        response = input("\n  Proceed with uninstall? [y/N]: ").strip().lower()
+        if response not in ("y", "yes"):
+            print_info("Uninstall cancelled.")
+            return False
+
+    # Delete artifacts — shim first (removes Resolve menu entry)
+    removed = []
+    failed = []
+    for path, is_dir, desc in installed:
+        try:
+            if is_dir:
+                shutil.rmtree(path)
+            else:
+                path.unlink()
+            removed.append(desc)
+            print_success(f"Removed: {desc}")
+        except OSError as e:
+            failed.append((desc, str(e)))
+            print_error(f"Failed to remove {desc}: {e}")
+
+    # Clear keyring credentials
+    clear_keyring()
+
+    # Remove pkg receipt (macOS only)
+    forget_pkg_receipt()
+
+    # Clean up staging leftovers
+    staging = Path(tempfile.gettempdir()) / "clipabit-staging"
+    if staging.exists():
+        try:
+            shutil.rmtree(staging)
+            print_success("Removed staging leftovers.")
+        except OSError:
+            pass
+
+    # Clean up empty parent directories
+    scripts_dir_resolved, modules_dir_resolved = get_resolve_directories(scripts_dir, modules_dir)
+    config_dir_resolved = get_config_directory(override=config_dir)
+    clipabit_dir_resolved = get_clipabit_directory(override=clipabit_dir)
+    for d in [clipabit_dir_resolved, config_dir_resolved]:
+        if d.exists() and not any(d.iterdir()):
+            try:
+                d.rmdir()
+                print_success(f"Removed empty directory: {d}")
+            except OSError:
+                pass
+
+    # Summary
+    print()
+    if failed:
+        print_warning(f"Uninstall completed with {len(failed)} error(s).")
+        for desc, err in failed:
+            print_error(f"  {desc}: {err}")
+        return False
+    else:
+        print_header("ClipABit Uninstall Complete")
+        print_success(f"Removed {len(removed)} item(s).")
+        if resolve_running:
+            print_warning("Restart DaVinci Resolve to clear the ClipABit menu entry.")
+        return True
+
+
+# ---------------------------------------------------------------------------
 # CLI
 # ---------------------------------------------------------------------------
 
 def main():
     parser = argparse.ArgumentParser(description="ClipABit Plugin Installer")
+    parser.add_argument("--uninstall", action="store_true",
+                        help="Uninstall ClipABit from this system.")
+    parser.add_argument("--yes", "-y", action="store_true",
+                        help="Skip confirmation prompts (use with --uninstall).")
     parser.add_argument("--download-only", action="store_true",
                         help="Download the plugin to staging dir and exit.")
     parser.add_argument("--local", type=str, default=None,
@@ -900,6 +1115,11 @@ def main():
     parser.add_argument("--staging-dir", type=str, default=None,
                         help="Directory to stage the downloaded plugin into.")
     args = parser.parse_args()
+
+    # Handle uninstall mode
+    if args.uninstall:
+        success = uninstall(yes=args.yes)
+        sys.exit(0 if success else 1)
 
     print_header("ClipABit Plugin Installer")
 
